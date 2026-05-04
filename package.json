@@ -9,6 +9,7 @@
     "extract": "node src/extract/index.js",
     "transform": "node src/transform/index.js",
     "load": "node src/load/index.js",
+    "test:ghl": "node scripts/test-ghl-connection.js",
     "sample:ghl": "node scripts/sample-ghl-contacts.js",
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",

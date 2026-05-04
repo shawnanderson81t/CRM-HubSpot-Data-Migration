@@ -1,0 +1,13 @@
+node_modules/
+.env
+logs/*.log
+data/exports/
+data/checkpoints/
+*.csv
+.DS_Store
+
+
+# Other
+CLAUDE_BRIEF.md
+access
+.claude/

@@ -1,0 +1,31 @@
+{
+  "name": "ghl-hubspot-migration",
+  "version": "1.0.0",
+  "description": "ETL pipeline for GoHighLevel → HubSpot CRM data migration",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "extract": "node src/extract/index.js",
+    "transform": "node src/transform/index.js",
+    "load": "node src/load/index.js",
+    "pilot": "node scripts/pilot-run.js",
+    "validate": "node src/validation/index.js",
+    "create-properties": "node scripts/create-hubspot-properties.js",
+    "migrate:tier1": "node scripts/migrate-tier.js --tier=1",
+    "migrate:tier2": "node scripts/migrate-tier.js --tier=2",
+    "migrate:tier3": "node scripts/migrate-tier.js --tier=3",
+    "test": "node --test src/**/*.test.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "csv-parse": "^5.5.0",
+    "dotenv": "^16.4.0",
+    "p-limit": "^5.0.0",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -9,5 +9,7 @@ data/checkpoints/
 
 # Other
 CLAUDE_BRIEF.md
+CLAUDE.md
 access
 .claude/
+

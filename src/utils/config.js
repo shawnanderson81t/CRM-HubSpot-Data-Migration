@@ -5,7 +5,7 @@ import 'dotenv/config';
  * @returns {Object} Validated config object
  */
 export function loadConfig() {
-  const required = ['GHL_API_KEY', 'HUBSPOT_ACCESS_TOKEN'];
+  const required = ['GHL_ENGAGER_SECRET_KEY', 'GHL_LOCATION_ID', 'HUBSPOT_API_KEY'];
   const missing = required.filter(key => !process.env[key]);
 
   if (missing.length > 0) {
@@ -14,12 +14,11 @@ export function loadConfig() {
 
   return {
     ghl: {
-      apiKey: process.env.GHL_API_KEY,
-      baseUrl: process.env.GHL_BASE_URL || 'https://rest.gohighlevel.com/v1',
+      engagerSecretKey: process.env.GHL_ENGAGER_SECRET_KEY,
       locationId: process.env.GHL_LOCATION_ID,
     },
     hubspot: {
-      accessToken: process.env.HUBSPOT_ACCESS_TOKEN,
+      apiKey: process.env.HUBSPOT_API_KEY,
       baseUrl: process.env.HUBSPOT_BASE_URL || 'https://api.hubapi.com',
       portalId: process.env.HUBSPOT_PORTAL_ID,
     },

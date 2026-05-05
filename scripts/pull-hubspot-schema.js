@@ -80,9 +80,12 @@ async function main() {
   try {
     properties = await fetchAllContactProperties();
   } catch (err) {
-    const status = err.response?.status;
-    const body   = JSON.stringify(err.response?.data ?? {});
-    console.error(`FAIL  HTTP ${status ?? 'network error'} — ${body || err.message}`);
+    const status  = err.response?.status;
+    const body    = JSON.stringify(err.response?.data ?? {});
+    const code    = err.code ?? '';
+    console.error(`FAIL  HTTP ${status ?? 'network error'} [${code}] — ${body || err.message}`);
+    console.error('URL :', err.config?.url ?? HS_BASE_URL + '/crm/v3/properties/contacts');
+    console.error('Key prefix:', apiKey?.slice(0, 8) + '...');
     process.exit(1);
   }
 

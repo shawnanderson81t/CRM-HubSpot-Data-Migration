@@ -77,7 +77,7 @@ function printFieldSummary(contacts) {
   console.log(`${'─'.repeat(55)}`);
   for (const [field] of fields) {
     const sample  = contacts.find(c => c[field] != null)?.[field];
-    const display = JSON.stringify(sample);
+    const display = JSON.stringify(sample) ?? String(sample);
     const value   = display.length > 60 ? display.slice(0, 57) + '...' : display;
     console.log(`${field.padEnd(35)} ${value}`);
   }

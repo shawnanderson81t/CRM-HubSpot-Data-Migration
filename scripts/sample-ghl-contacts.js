@@ -1,16 +1,16 @@
 /**
  * scripts/sample-ghl-contacts.js
  *
- * Pulls the first 100 contacts from the GHL /contacts/ endpoint and writes
- * the raw JSON response to data/samples/ghl-sample-100.json.
+ * Pulls the first 100 contacts from GET /contacts/ and writes the raw JSON
+ * response to data/samples/ghl-sample-100.json so we can map every field.
  *
  * Usage:
  *   node scripts/sample-ghl-contacts.js
  *   npm run sample:ghl
  *
- * Required env vars (see .env.example):
- *   GHL_ENGAGER_SECRET_KEY  — secret key for https://api.engager.ai/get-token
- *   GHL_LOCATION_ID         — GHL location ID
+ * Required env vars:
+ *   GHL_API_KEY      — Private Integration Token from GHL Settings > Private Integrations
+ *   GHL_LOCATION_ID  — GHL sub-account location ID
  */
 
 import 'dotenv/config';
@@ -18,11 +18,10 @@ import axios from 'axios';
 import { writeFileSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 
-const ENGAGER_TOKEN_URL = process.env.GHL_ENGAGER_TOKEN_URL || 'https://api.engager.ai/get-token';
-const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
-const GHL_VERSION = process.env.GHL_VERSION || '2021-07-28';
-const OUTPUT_PATH = resolve(process.env.GHL_SAMPLE_OUTPUT_PATH || './data/samples/ghl-sample-100.json');
-const SAMPLE_LIMIT = parseInt(process.env.GHL_SAMPLE_LIMIT || '100', 10);
+const GHL_BASE_URL  = process.env.GHL_BASE_URL         || 'https://services.leadconnectorhq.com';
+const GHL_VERSION   = process.env.GHL_VERSION          || '2021-07-28';
+const OUTPUT_PATH   = resolve(process.env.GHL_SAMPLE_OUTPUT_PATH || './data/samples/ghl-sample-100.json');
+const SAMPLE_LIMIT  = parseInt(process.env.GHL_SAMPLE_LIMIT || '100', 10);
 
 function requireEnv(name) {
   const val = process.env[name];
@@ -31,37 +30,17 @@ function requireEnv(name) {
 }
 
 /**
- * Fetches a Bearer token from the Engager token service.
- * @param {string} secretKey
- * @returns {Promise<string>}
- */
-async function fetchToken(secretKey) {
-  console.log('Fetching Engager token...');
-  const res = await axios.get(`${ENGAGER_TOKEN_URL}/${secretKey}`);
-
-  // Token may be at res.data.token or res.data directly — handle both shapes
-  const token = res.data?.token ?? (typeof res.data === 'string' ? res.data : null);
-  if (!token) {
-    throw new Error(
-      `Unexpected Engager token response shape: ${JSON.stringify(res.data)}`
-    );
-  }
-  console.log('Token acquired.');
-  return token;
-}
-
-/**
- * Fetches one page of contacts (limit = SAMPLE_LIMIT) from GHL.
- * @param {string} token
+ * Fetches one page of contacts from GHL using the Private Integration Token.
+ * @param {string} apiKey
  * @param {string} locationId
  * @returns {Promise<Object>} Raw response body
  */
-async function fetchContactsPage(token, locationId) {
+async function fetchContactsPage(apiKey, locationId) {
   console.log(`Fetching first ${SAMPLE_LIMIT} contacts from GHL...`);
   const res = await axios.get(`${GHL_BASE_URL}/contacts/`, {
     params: { locationId, limit: SAMPLE_LIMIT },
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${apiKey}`,
       Version: GHL_VERSION,
       'Content-Type': 'application/json',
     },
@@ -70,7 +49,7 @@ async function fetchContactsPage(token, locationId) {
 }
 
 /**
- * Collects every unique top-level field key across all contacts and prints a summary.
+ * Prints a field presence table and sample values for each field across all contacts.
  * @param {Array<Object>} contacts
  */
 function printFieldSummary(contacts) {
@@ -82,6 +61,7 @@ function printFieldSummary(contacts) {
   }
 
   const fields = Object.entries(fieldCounts).sort(([, a], [, b]) => b - a);
+
   console.log(`\n${'─'.repeat(55)}`);
   console.log(`FIELD SUMMARY — ${contacts.length} contacts sampled`);
   console.log(`${'─'.repeat(55)}`);
@@ -91,33 +71,28 @@ function printFieldSummary(contacts) {
     const pct = ((count / contacts.length) * 100).toFixed(0).padStart(3);
     console.log(`${field.padEnd(35)} ${count}/${contacts.length} (${pct}%)`);
   }
-  console.log(`${'─'.repeat(55)}\n`);
 
-  // Also show a sample value for each field (from the first contact that has it non-null)
+  console.log(`\n${'─'.repeat(55)}`);
   console.log('SAMPLE VALUES (first non-null per field):');
   console.log(`${'─'.repeat(55)}`);
   for (const [field] of fields) {
-    const sample = contacts.find(c => c[field] != null)?.[field];
+    const sample  = contacts.find(c => c[field] != null)?.[field];
     const display = JSON.stringify(sample);
-    const truncated = display.length > 60 ? display.slice(0, 57) + '...' : display;
-    console.log(`${field.padEnd(35)} ${truncated}`);
+    const value   = display.length > 60 ? display.slice(0, 57) + '...' : display;
+    console.log(`${field.padEnd(35)} ${value}`);
   }
   console.log(`${'─'.repeat(55)}\n`);
 }
 
 async function main() {
-  const secretKey = requireEnv('GHL_ENGAGER_SECRET_KEY');
+  const apiKey     = requireEnv('GHL_API_KEY');
   const locationId = requireEnv('GHL_LOCATION_ID');
 
-  const token = await fetchToken(secretKey);
-  const rawResponse = await fetchContactsPage(token, locationId);
+  const rawResponse = await fetchContactsPage(apiKey, locationId);
 
-  // Ensure output directory exists
   mkdirSync('./data/samples', { recursive: true });
-
-  // Write full raw response so nothing is lost
   writeFileSync(OUTPUT_PATH, JSON.stringify(rawResponse, null, 2), 'utf8');
-  console.log(`\nRaw response saved to: ${OUTPUT_PATH}`);
+  console.log(`Raw response saved to: ${OUTPUT_PATH}`);
 
   const contacts = rawResponse?.contacts ?? rawResponse ?? [];
 

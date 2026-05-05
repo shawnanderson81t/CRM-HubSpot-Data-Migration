@@ -5,7 +5,7 @@ import 'dotenv/config';
  * @returns {Object} Validated config object
  */
 export function loadConfig() {
-  const required = ['GHL_ENGAGER_SECRET_KEY', 'GHL_LOCATION_ID', 'HUBSPOT_API_KEY'];
+  const required = ['GHL_API_KEY', 'GHL_LOCATION_ID', 'HUBSPOT_API_KEY'];
   const missing = required.filter(key => !process.env[key]);
 
   if (missing.length > 0) {
@@ -14,7 +14,7 @@ export function loadConfig() {
 
   return {
     ghl: {
-      engagerSecretKey: process.env.GHL_ENGAGER_SECRET_KEY,
+      apiKey: process.env.GHL_API_KEY,
       locationId: process.env.GHL_LOCATION_ID,
     },
     hubspot: {

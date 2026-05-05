@@ -2,57 +2,36 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 
 const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
-const GHL_VERSION = process.env.GHL_VERSION || '2021-07-28';
-const ENGAGER_TOKEN_URL = process.env.GHL_ENGAGER_TOKEN_URL || 'https://api.engager.ai/get-token';
+const GHL_VERSION  = process.env.GHL_VERSION  || '2021-07-28';
 
 /**
- * Fetches a Bearer token from the Engager token service.
- * @param {string} secretKey - The Engager secret key from .env
- * @returns {Promise<string>} Bearer token
- */
-async function fetchEngagerToken(secretKey) {
-  const response = await axios.get(`${ENGAGER_TOKEN_URL}/${secretKey}`);
-  const token = response.data?.token ?? response.data;
-  if (!token) throw new Error('Engager token response missing token field');
-  return token;
-}
-
-/**
- * GoHighLevel REST API client (via LeadConnector / Engager)
- * Base URL: https://services.leadconnectorhq.com
- * Auth: Bearer token obtained from https://api.engager.ai/get-token/{secret_key}
- * Version header: 2021-07-28
+ * GoHighLevel REST API client
+ * Auth: Private Integration Token used directly as Bearer (GHL Settings > Private Integrations)
  */
 export class GHLClient {
   /**
    * @param {Object} config
-   * @param {string} config.engagerSecretKey - Secret key for Engager token endpoint
+   * @param {string} config.apiKey - GHL Private Integration Token
    * @param {string} config.locationId - GHL location ID scoping all queries
    */
   constructor(config) {
-    this.engagerSecretKey = config.engagerSecretKey;
     this.locationId = config.locationId;
-    this._token = null;
-    this._client = null;
-  }
-
-  /**
-   * Initialises the axios client with a fresh Engager token.
-   * Call once before making requests; token is cached for the session.
-   * @returns {Promise<void>}
-   */
-  async init() {
-    this._token = await fetchEngagerToken(this.engagerSecretKey);
     this._client = axios.create({
       baseURL: GHL_BASE_URL,
       headers: {
-        Authorization: `Bearer ${this._token}`,
+        Authorization: `Bearer ${config.apiKey}`,
         Version: GHL_VERSION,
         'Content-Type': 'application/json',
       },
     });
-    logger.info('GHLClient initialised with Engager token');
+    logger.info('GHLClient initialised');
   }
+
+  /**
+   * @deprecated No longer needed — kept as no-op for backwards compatibility
+   * @returns {Promise<void>}
+   */
+  async init() {}
 
   /**
    * Returns the initialised axios client, throwing if init() was not called.

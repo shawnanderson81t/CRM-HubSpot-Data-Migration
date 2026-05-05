@@ -10,6 +10,7 @@
     "transform": "node src/transform/index.js",
     "load": "node src/load/index.js",
     "test:ghl": "node scripts/test-ghl-connection.js",
+    "schema:hs": "node scripts/pull-hubspot-schema.js",
     "sample:ghl": "node scripts/sample-ghl-contacts.js",
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",

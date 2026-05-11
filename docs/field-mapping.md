@@ -50,13 +50,36 @@ GHL returns `[{id, value}]` pairs. IDs resolved via `/locations/{id}/customField
 | `ZwJCtoQ4rG7eqZCJap0e` | Community Join Date | DATE | `community_join_date` | date | Unix ms → `new Date(value).toISOString().split('T')[0]` | 🔨 Needs creation |
 | `agPOPXVU1qhYnjJxPz7V` | E2I-SMS Eng-Score | NUMERICAL | `sms_engagement_score` | number | Integer — copy as-is | 🔨 Needs creation |
 | `dW752RjWvFrfBjpeSoTt` | E2I-Email Eng-Score | NUMERICAL | `email_engagement_score` | number | Integer — copy as-is | 🔨 Needs creation |
-| `1rnHjHmUbV5XkqyEVVHx` | Workshop Payment Status | SINGLE_OPTIONS | `payment_status` | enumeration | Map option labels → HubSpot enum values | 🔨 Needs creation |
+| `1rnHjHmUbV5XkqyEVVHx` | Workshop Payment Status | SINGLE_OPTIONS | `payment_status` | enumeration | Values: Paid in Full / Partial Payment / No Payment Required / Not Paid | 🔨 Needs creation |
 | `242BK1r5mwKE4NDdEspk` | Workshop Payment Balance | MONETORY | `payment_balance` | number | Decimal — copy as-is | 🔨 Needs creation |
+| `workshop_paid` | Workshop Amount Paid | MONETORY | `workshop_amount_paid` | number | Amount paid to date | 🔨 Needs creation |
+| `workshop_total` | Workshop Total Amount | MONETORY | `workshop_total_amount` | number | Total contract value | 🔨 Needs creation |
+| `workshop_purchase_date` | Workshop Purchase Date | DATE | `workshop_purchase_date` | date | ISO date | 🔨 Needs creation |
+| `payment_transaction_id` | Payment Transaction ID | TEXT | `payment_transaction_id` | string | Direct copy | 🔨 Needs creation |
+| `workshop_payment_type` | Workshop Payment Method | CHECKBOX | `payment_method` | enumeration (multi) | Credit Card, ACH, Cash, Check, Wire, UGA Financing | 🔨 Needs creation |
+| `workshop_payment_history` | Workshop Payment History | LARGE_TEXT | `workshop_payment_history` | string | Free-text notes field — migrate as custom text property | 🔨 Needs creation |
+| `preview_payment_status` | Preview Payment Status | SINGLE_OPTIONS | `preview_payment_status` | enumeration | Values: Paid in Full / Partial Payment / No Payment Required | 🔨 Needs creation |
+| `preview_payment_balance` | Preview Payment Balance | MONETORY | `preview_payment_balance` | number | Decimal — copy as-is | 🔨 Needs creation |
+| `preview_paid` | Preview Amount Paid | MONETORY | `preview_amount_paid` | number | Amount paid to date | 🔨 Needs creation |
+| `preview_purchase_date` | Preview Purchase Date | DATE | `preview_purchase_date` | date | ISO date | 🔨 Needs creation |
+| `preview_payment_methods` | Preview Payment Method | CHECKBOX | `preview_payment_method` | enumeration (multi) | Direct copy options | 🔨 Needs creation |
 | `0b6zq88gXLBCNzDP325l` | Preview Invoice ID | TEXT | `preview_invoice_id` | string | Direct copy | 🔨 Needs creation |
 | `1AhH8EKwizmtvm2gw45U` | Preview Attendance Status | SINGLE_OPTIONS | `preview_attendance_status` | enumeration | Map option labels | 🔨 Needs creation |
-| _(per-event RADIO fields)_ | e.g. `20231113_JAX`, `20250929_HNL` | RADIO | **Do not migrate** | — | Redundant with tag-based market_city | ❌ Skip |
+| `market_name` | Primary Market | RADIO | `primary_market` | enumeration | 88 markets — single-value primary market (separate from eventtag) | 🔨 Needs creation |
+| `workshop_product_package` | Workshop Product Package | SINGLE_OPTIONS | `workshop_product_package` | enumeration | ALA CARTE, DIAMOND, GOLD, DIAMOND ELITE PROGRAM, FOUNDATIONS ONLY, REAL ESTATE FOCUSED PLATINUM, TAX LIEN FOCUSED PLATINUM, FOUNDER | ❓ Check HubSpot first |
+| `products_purchased` | Products Purchased | CHECKBOX | `products_purchased` | enumeration (multi) | 3-Day Workshop, Foundation Bootcamp, Tax Lien Expo, Real Estate Summit, Auction Experience, Commercial Bootcamp, PropStream, Fly-Out Mentorship, etc. | ❓ Check HubSpot first |
+| `number_of_coaching_sessions_purchased` | Coaching Sessions Purchased | NUMERICAL | `coaching_sessions_purchased` | number | Integer (3–16) | 🔨 Needs creation |
+| `assigned_coach` | Assigned Coach | SINGLE_OPTIONS | `assigned_coach` | enumeration | 16 coaches | 🔨 Needs creation |
+| `coaching_sessions_fulfilled` | Coaching Sessions Fulfilled | CHECKBOX | `coaching_sessions_fulfilled` | enumeration (multi) | Sessions 1–25 checkbox — fulfilled sessions | 🔨 Needs creation |
+| `workshop_team` | Workshop Sales Rep | CHECKBOX | `workshop_team` (existing) | multi-select | Property already exists in HubSpot ("Workshop Team", TLC - Workshop Sales group). **HubSpot is the source of truth for option values** — pull options list from HS, not GHL. Copy GHL values directly (no lookup). | ✅ Exists — use HS as truth |
+| `preview_sales_rep` | Preview Sales Rep | CHECKBOX | `preview_sales_team` (existing) | multi-select | Property already exists in HubSpot ("Preview Sales Team", TLC - Preview Sales group). HubSpot is source of truth for options. Copy GHL values directly. | ✅ Exists — use HS as truth |
+| _(GHL telesales rep field)_ | Telesales Rep | CHECKBOX | `telesales_rep_team` (existing) | multi-select | "Telesales Rep/Team" exists in HubSpot (Telesales group). Andy confirmed values copied directly from GHL — identical. Map directly, no lookup. | ✅ Exists — values match GHL |
+| `guest_of_email` | Guest Of (Email) | TEXT | `guest_of` association | — | Read email → look up primary contact → create contact-to-contact association | ⚠️ Association pass |
+| `hubspot_contact_id` | HubSpot Contact ID (GHL) | TEXT | Match key | — | Highest-confidence dedup key. If populated, match directly by HubSpot ID — skip email/phone lookup. | ✅ Dedup logic |
+| _(session 1–25 date fields)_ | `session_1_date_fulfilled` … `session_25_date_fulfilled` | DATE | **Do not migrate** | — | Too granular — summary captured via `coaching_sessions_fulfilled` | ❌ Skip |
+| _(per-event RADIO fields)_ | e.g. `20231113_JAX`, `20250929_HNL` | RADIO | **Do not migrate** | — | Redundant with tag-based eventtag | ❌ Skip |
 
-> **Note**: The GHL custom fields list has hundreds of per-event RADIO fields (one per city per event date). These are redundant — the tag system encodes the same information. Do NOT create corresponding HubSpot properties. Confirm with Andy before any per-event field migration.
+> **Note**: 1,211 custom fields total. ~1,200 are per-event RADIO fields (one per city per event date) — redundant with the tag system. Do not migrate. Only the fields listed above are in scope.
 
 ---
 
@@ -82,11 +105,15 @@ Priority order when multiple tier tags exist (contacts accumulate tags through u
 
 **Transform logic**: Collect all buyer-tier tags on a contact, select the one with the lowest priority number, set as `buyer_tier`.
 
-### 3b. Market / City → `eventtag` (existing HubSpot property — Andy's)
+### 3b. Market / City — Two separate fields (confirmed Day 5)
 
-> **Discovery**: Andy already created `eventtag` (checkbox multi-select) with full city names (Albany, Albuquerque, Atlanta, etc.). This covers the `market_city` use case. **Use `eventtag` instead of creating a new `market_city` property.** Confirm with Andy that options list is complete.
+**`eventtag`** (existing HubSpot property — Andy's): Multi-select checkbox. Records all markets where a contact attended events. Populated from date-stamped GHL tags (`YYYYMMDD_CITYCODE`). **Do not modify Andy's field structure** — it is tied to EventHappily + Airtable automations. 135+ cities.
 
-GHL tag pattern: `YYYYMMDD_CITYCODE` — extract the city code suffix and map to city name:
+**`primary_market`** (new property — to create): Single-value dropdown. Populated from GHL `market_name` radio field (88 markets). Captures the contact's primary/home market. Separate from `eventtag`. Also must be written to Deal records for performance reporting.
+
+These are complementary — `eventtag` = all cities attended (multi), `primary_market` = primary market affinity (single).
+
+GHL tag pattern for `eventtag`: `YYYYMMDD_CITYCODE` — extract the city code suffix and map to city name:
 
 | Code | City | Code | City |
 |---|---|---|---|
@@ -221,41 +248,72 @@ GHL tag pattern: `YYYYMMDD_CITYCODE` — extract the city code suffix and map to
 
 ## 6. Complete Custom Property Status
 
-| Property | Already Exists? | Action Needed |
-|---|---|---|
-| `event_type` | ✅ Yes (Andy created May 4) | Add options: Foundations, Commercial, Expo, Fly Out |
-| `eventtag` | ✅ Yes (Andy created May 4) | Confirm city list is complete — use instead of `market_city` |
-| `ghl_contact_id` | ❌ No | Create — text |
-| `buyer_tier` | ❌ No | Create — dropdown (9 options) |
-| `attendance_status` | ❌ No | Create — dropdown |
-| `registration_source` | ❌ No | Create — text |
-| `registration_medium` | ❌ No | Create — text |
-| `payment_status` | ❌ No | Create — dropdown |
-| `payment_balance` | ❌ No | Create — number |
-| `community_join_date` | ❌ No | Create — date |
-| `sms_engagement_score` | ❌ No | Create — number |
-| `email_engagement_score` | ❌ No | Create — number |
-| `cancellation_status` | ❌ No | Create — dropdown |
-| `fulfillment_status` | ❌ No | Create — dropdown |
-| `preview_invoice_id` | ❌ No | Create — text |
-| `preview_attendance_status` | ❌ No | Create — dropdown |
+_Updated after Day 5 client session — May 8, 2026_
 
-**Summary: 2 exist (need updates), 14 need creating.**
+_Updated May 12 after auditing live HubSpot schema — most properties already exist from Andy's Oct 2025 migration attempt._
+
+### Existing — Already in HubSpot (use as-is, no creation needed)
+
+| HubSpot Property Name | Label | GHL Source | Action |
+|---|---|---|---|
+| `event_type` | Event Type | Tags | Add 4 options: Foundations, Commercial, Expo, Fly Out |
+| `eventtag` | Workshop Event Tag | Tags (YYYYMMDD_CODE) | No changes — tied to Airtable/EventHappily |
+| `market_name` | Market Name | `market_name` | Use directly — no need to create `primary_market` |
+| `workshop_payment_status` | Workshop Payment Status | `workshop_payment_status` | Use as-is |
+| `workshop_payment_balance` | Workshop Payment Balance | `workshop_payment_balance` | Use as-is |
+| `workshop_paid` | Workshop Paid | `workshop_paid` | Use as-is |
+| `workshop_total` | Workshop Total | `workshop_total` | Use as-is |
+| `workshop_purchase_date` | Workshop Purchase Date | `workshop_purchase_date` | Use as-is |
+| `workshop_payment_type` | Workshop Payment Type | `workshop_payment_type` | Use as-is |
+| `workshop_payment_history` | Workshop Payment History | `workshop_payment_history` | Use as-is |
+| `payment_transaction_id` | Payment Transaction ID | `payment_transaction_id` | Use as-is |
+| `preview_payment_status` | Preview Payment Status | `preview_payment_status` | Use as-is |
+| `preview_payment_balance` | Preview Payment Balance | `preview_payment_balance` | Use as-is |
+| `preview_paid` | Preview Paid | `preview_paid` | Use as-is |
+| `preview_purchase_date` | Preview Purchase Date | `preview_purchase_date` | Use as-is |
+| `preview_payment_methods` | Preview Payment Method(s) | `preview_payment_methods` | Use as-is |
+| `preview_invoice_id_payment_id` | Preview Invoice ID | `preview_invoice_id` | Use as-is (different name than planned) |
+| `preview_attendance_status` | Preview Attendance Status | `preview_attendance_status` | Use as-is |
+| `preview_sales_total` | Preview Sales Total | `preview_sales_total` | Use as-is |
+| `workshop_product_package` | Workshop Product Package | `workshop_product_package` | Use as-is |
+| `products_purchased` | Products Purchased | `products_purchased` | Use as-is |
+| `number_of_coaching_sessions_purchased` | Number of Coaching Sessions Purchased | `number_of_coaching_sessions_purchased` | Use as-is (different name than planned) |
+| `assigned_coach` | Assigned Coach | `assigned_coach` | Use as-is |
+| `coaching_sessions_fulfilled` | Coaching Sessions Fulfilled | `coaching_sessions_fulfilled` | Use as-is |
+| `workshop_team` | Workshop Team | `workshop_team` | Use as-is |
+| `preview_sales_rep` | Preview Sales Team | `preview_sales_rep` | Use as-is |
+| `telesales_repteam` | Telesales Rep/Team | _(GHL source TBD)_ | Use as-is (different name than planned) |
+| `sms_engmt_score` | E2I-SMS Eng-Score | SMS Eng-Score custom field | Use as-is (different name than planned) |
+| `email_engmt_score` | E2I-Email Eng-Score | Email Eng-Score custom field | Use as-is (different name than planned) |
+
+### New — Must Create (7 properties missing from HubSpot)
+
+| Property Name | Label | Type | Source |
+|---|---|---|---|
+| `ghl_contact_id` | GHL Contact ID | text | `id` — rollback + dedup key |
+| `buyer_tier` | Buyer Tier | dropdown (9 values) | Tags |
+| `registration_source` | Registration Source | text | `attributions[0].utmSessionSource` |
+| `registration_medium` | Registration Medium | text | `attributions[0].medium` |
+| `community_join_date` | Community Join Date | date | Community Join Date custom field |
+| `cancellation_status` | Cancellation Status | dropdown (3 values) | Tags |
+| `fulfillment_status` | Fulfillment Status | multi-select (6 values) | Tags |
+
+**Summary: 29 already exist (5 with name differences to note in fieldMapper), 7 to create, 1 to update options (event_type).**
 
 ---
 
-## 7. Open Questions for Andy
+## 7. Open Questions — Status After Day 5
 
-| # | Question | Blocks |
+| # | Question | Status |
 |---|---|---|
-| 1 | Is `eventtag` the canonical market/city field, or should we create a separate `market_city`? | Transform logic |
-| 2 | What are the full option values for GHL `workshop_payment_status`? | `payment_status` dropdown options |
-| 3 | What does `businessId` represent? | Whether to map or skip |
-| 4 | How are multi-location contacts handled — one record or multiple? | Association architecture |
-| 5 | Is `Preview Guest - Group` custom field the link to the primary contact for guest associations? | `guest_of` association pass |
-| 6 | Are the `pre_community_subjtest_*` tags A/B test markers safe to skip? | Transform logic |
-| 7 | What GHL user IDs map to which HubSpot owner IDs? | `hubspot_owner_id` mapping |
-| 8 | Should `additionalEmails` be stored as a note on the contact? | Gap coverage |
+| 1 | Is `eventtag` the canonical market/city field, or separate? | ✅ **Resolved** — both: `eventtag` stays (multi-value, all cities attended), `primary_market` added (single-value) |
+| 2 | What are the full option values for `workshop_payment_status`? | ✅ **Resolved** — Workshop: Paid in Full / Partial Payment / No Payment Required / Not Paid. Preview: Paid in Full / Partial Payment / No Payment Required |
+| 3 | What does `businessId` represent? | ❓ **Open** — null on all sampled contacts. Carry to Phase 2. |
+| 4 | How are multi-location contacts handled? | ❓ **Open** — not addressed in Day 5. Carry to Phase 2. |
+| 5 | What is the guest association link field? | ✅ **Resolved** — `guest_of_email` stores primary contact's email on the guest record. `preview_guest__host_id` stores GHL ID as backup. |
+| 6 | Are `pre_community_subjtest_*` tags safe to skip? | ❓ **Open** — not addressed. Carry to Phase 2. |
+| 7 | How do GHL sales rep names map to HubSpot owners? | ✅ **Resolved (contact level)** — `workshop_team` and `preview_sales_team` already exist in HubSpot as checkbox properties. Copy values directly — no lookup needed. Telesales source field TBD. `hubspot_owner_id` on deals is a separate question. |
+| 8 | Should `additionalEmails` be stored as a note? | ❓ **Open** — not addressed. Carry to Phase 2. |
 
 ---
 

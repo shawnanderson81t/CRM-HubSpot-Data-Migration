@@ -153,6 +153,60 @@ export class GHLClient {
   }
 
   /**
+   * Stream all opportunities in a pipeline, returning unique contactIds.
+   * Uses cursor-based pagination on /opportunities/search.
+   *
+   * @param {Object} options
+   * @param {string} options.pipelineId - GHL pipeline ID to filter by
+   * @param {number} [options.limit=Infinity] - Stop after collecting this many unique contactIds
+   * @param {number} [options.pageSize=100] - Page size (max 100)
+   * @param {Function} [options.onProgress] - Called with ({ scanned, unique, page }) each page
+   * @returns {Promise<string[]>} Array of unique contact IDs
+   */
+  async getContactIdsByPipeline({ pipelineId, limit = Infinity, pageSize = 100, onProgress } = {}) {
+    const client = this._getClient();
+    const contactIds = new Set();
+    let page = 1;
+    let startAfterId = null;
+    let scanned = 0;
+
+    while (contactIds.size < limit) {
+      const params = {
+        location_id: this.locationId,
+        pipeline_id: pipelineId,
+        limit: pageSize,
+      };
+      if (startAfterId) params.startAfterId = startAfterId;
+
+      let response;
+      try {
+        response = await client.get('/opportunities/search', { params });
+      } catch (err) {
+        throw new Error(`getContactIdsByPipeline failed on page ${page}: ${err.message}`);
+      }
+
+      const opportunities = response.data?.opportunities ?? [];
+      const meta = response.data?.meta ?? {};
+      scanned += opportunities.length;
+
+      for (const opp of opportunities) {
+        if (opp.contactId) contactIds.add(opp.contactId);
+        if (contactIds.size >= limit) break;
+      }
+
+      if (onProgress) onProgress({ scanned, unique: contactIds.size, page });
+      logger.info(`getContactIdsByPipeline page ${page}: scanned ${scanned}, unique contacts ${contactIds.size}`);
+
+      startAfterId = meta.startAfterId ?? null;
+      if (!startAfterId || opportunities.length < pageSize) break;
+      page++;
+    }
+
+    logger.info(`getContactIdsByPipeline complete — ${contactIds.size} unique contacts from ${scanned} opportunities`);
+    return [...contactIds];
+  }
+
+  /**
    * Fetch all pipeline stage definitions for the location.
    * @returns {Promise<Array>} Array of pipeline objects (each with nested stages)
    */

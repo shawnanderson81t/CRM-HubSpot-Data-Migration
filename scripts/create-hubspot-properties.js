@@ -167,6 +167,10 @@ async function addOptionsToProperty(propertyName, newOptions) {
     return { skipped: true, reason: 'all options already exist' };
   }
 
+  // Assign display orders after the existing max to avoid conflicts
+  const maxOrder = existing.options.reduce((max, o) => Math.max(max, o.displayOrder ?? 0), 0);
+  toAdd.forEach((o, i) => { o.displayOrder = maxOrder + 1 + i; });
+
   const merged = [...existing.options, ...toAdd];
   await axios.patch(`${BASE_URL}/${propertyName}`, { options: merged }, { headers });
   return { skipped: false, added: toAdd.map(o => o.label) };

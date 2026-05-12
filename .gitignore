@@ -3,6 +3,8 @@ node_modules/
 logs/*.log
 data/exports/
 data/checkpoints/
+data/*
+docs/*
 *.csv
 .DS_Store
 

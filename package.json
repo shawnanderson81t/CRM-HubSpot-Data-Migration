@@ -13,6 +13,7 @@
     "schema:hs": "node scripts/pull-hubspot-schema.js",
     "sample:ghl": "node scripts/sample-ghl-contacts.js",
     "sample:ghl-endpoints": "node scripts/sample-ghl-endpoints.js",
+    "extract:sample": "node scripts/extract-sample.js",
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",
     "create-properties": "node scripts/create-hubspot-properties.js",

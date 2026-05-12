@@ -167,4 +167,62 @@ export class GHLClient {
       throw new Error(`Failed to fetch pipeline stages: ${err.message}`);
     }
   }
+
+  /**
+   * Stream contacts page by page, filter by tags in memory, stop when limit reached.
+   * GHL does not support server-side tag filtering — filtering is applied per batch.
+   *
+   * @param {Object} options
+   * @param {string[]} [options.tags] - Return only contacts that have at least one of these tags
+   * @param {string[]} [options.excludeTags] - Skip contacts that have any of these tags
+   * @param {number} [options.limit=100] - Stop after collecting this many matching contacts
+   * @param {number} [options.pageSize=100] - GHL page size (max 100)
+   * @param {Function} [options.onProgress] - Called with ({ scanned, matched, page }) each page
+   * @returns {Promise<Array>} Matched contact objects up to limit
+   */
+  async findContacts({ tags = [], excludeTags = [], limit = 100, pageSize = 100, onProgress } = {}) {
+    const client = this._getClient();
+    const tagSet = new Set(tags);
+    const excludeSet = new Set(excludeTags);
+    const matched = [];
+    let startAfterId = null;
+    let page = 1;
+    let scanned = 0;
+
+    while (matched.length < limit) {
+      const params = { locationId: this.locationId, limit: pageSize };
+      if (startAfterId) params.startAfterId = startAfterId;
+
+      let response;
+      try {
+        response = await client.get('/contacts/', { params });
+      } catch (err) {
+        throw new Error(`findContacts failed on page ${page}: ${err.message}`);
+      }
+
+      const contacts = response.data?.contacts ?? [];
+      const meta = response.data?.meta ?? {};
+      scanned += contacts.length;
+
+      for (const contact of contacts) {
+        if (matched.length >= limit) break;
+        const contactTags = contact.tags ?? [];
+
+        if (excludeSet.size > 0 && contactTags.some(t => excludeSet.has(t))) continue;
+        if (tagSet.size > 0 && !contactTags.some(t => tagSet.has(t))) continue;
+
+        matched.push(contact);
+      }
+
+      if (onProgress) onProgress({ scanned, matched: matched.length, page });
+      logger.info(`findContacts page ${page}: scanned ${scanned}, matched ${matched.length}/${limit}`);
+
+      startAfterId = meta.startAfterId ?? null;
+      if (!startAfterId || contacts.length < pageSize) break;
+      page++;
+    }
+
+    logger.info(`findContacts complete — scanned ${scanned} contacts, returning ${matched.length}`);
+    return matched;
+  }
 }

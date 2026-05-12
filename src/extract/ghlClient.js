@@ -167,16 +167,16 @@ export class GHLClient {
     const client = this._getClient();
     const contactIds = new Set();
     let page = 1;
-    let startAfterId = null;
     let scanned = 0;
 
     while (contactIds.size < limit) {
+      // Opportunities API uses page-number pagination (not startAfterId like contacts)
       const params = {
         location_id: this.locationId,
         pipeline_id: pipelineId,
         limit: pageSize,
+        page,
       };
-      if (startAfterId) params.startAfterId = startAfterId;
 
       let response;
       try {
@@ -186,7 +186,6 @@ export class GHLClient {
       }
 
       const opportunities = response.data?.opportunities ?? [];
-      const meta = response.data?.meta ?? {};
       scanned += opportunities.length;
 
       for (const opp of opportunities) {
@@ -197,8 +196,7 @@ export class GHLClient {
       if (onProgress) onProgress({ scanned, unique: contactIds.size, page });
       logger.info(`getContactIdsByPipeline page ${page}: scanned ${scanned}, unique contacts ${contactIds.size}`);
 
-      startAfterId = meta.startAfterId ?? null;
-      if (!startAfterId || opportunities.length < pageSize) break;
+      if (opportunities.length < pageSize) break;
       page++;
     }
 

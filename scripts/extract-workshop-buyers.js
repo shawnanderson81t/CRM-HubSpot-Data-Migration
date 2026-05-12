@@ -54,18 +54,18 @@ async function run() {
   const matched = [];
   const seenIds = new Set();
   let page = 1;
-  let startAfterId = null;
   let oppScanned = 0;
   let contactsFetched = 0;
   let fetchErrors = 0;
 
   while (matched.length < TARGET_COUNT) {
+    // Opportunities API uses page-number pagination (not startAfterId like contacts)
     const params = {
       location_id: config.ghl.locationId,
       pipeline_id: WORKSHOP_PIPELINE_ID,
       limit: 100,
+      page,
     };
-    if (startAfterId) params.startAfterId = startAfterId;
 
     let response;
     try {
@@ -75,7 +75,6 @@ async function run() {
     }
 
     const opportunities = response.data?.opportunities ?? [];
-    const meta = response.data?.meta ?? {};
     oppScanned += opportunities.length;
 
     if (opportunities.length === 0) break;
@@ -106,8 +105,7 @@ async function run() {
 
     logger.info(`extract-wb page ${page}: opps=${oppScanned}, fetched=${contactsFetched}, matched=${matched.length}`);
 
-    startAfterId = meta.startAfterId ?? null;
-    if (!startAfterId || opportunities.length < 100) break;
+    if (opportunities.length < 100) break;
     page++;
   }
 

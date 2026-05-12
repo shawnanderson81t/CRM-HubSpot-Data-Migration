@@ -1,18 +1,19 @@
 /**
  * Extract Workshop Buyers from GHL via the Workshop pipeline opportunities.
  *
- * Strategy: GHL paginates contacts newest-first, so the first 134K+ contacts are
- * HS→GHL imports with no buyer tags. Instead, we query the Workshop pipeline
- * opportunities to get contact IDs, then fetch each contact individually.
+ * Strategy: GHL paginates contacts newest-first, so tag-based contact scanning
+ * hits 134K+ HS→GHL imports before reaching real buyers. Instead, we stream
+ * the Workshop pipeline opportunities page-by-page, fetch each contact by ID,
+ * filter for wb / wb_diamond tags, and stop when we have enough.
  *
  * Workshop pipeline ID: sJF6NWKqQAF4qZGBK3cq ("2 - Workshops")
  *
  * Usage:
- *   node scripts/extract-workshop-buyers.js              # 100 contacts (default)
+ *   node scripts/extract-workshop-buyers.js              # 100 WBs (default)
  *   node scripts/extract-workshop-buyers.js --count=50   # custom count
  *
  * Output:
- *   data/samples/workshop-buyers-sample.json    — contact records
+ *   data/samples/workshop-buyers-sample.json    — contact records (WBs only)
  *   data/reports/extract-wb-[ts].json           — run report
  */
 
@@ -31,6 +32,7 @@ const SAMPLES_DIR = join(__dirname, '../data/samples');
 const REPORTS_DIR = join(__dirname, '../data/reports');
 
 const WORKSHOP_PIPELINE_ID = 'sJF6NWKqQAF4qZGBK3cq';
+const BUYER_TAGS = new Set(['wb', 'wb_diamond']);
 
 const TARGET_COUNT = parseInt(
   process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '100'
@@ -39,59 +41,87 @@ const TARGET_COUNT = parseInt(
 async function run() {
   const config = loadConfig();
   const ghl = new GHLClient(config.ghl);
+  const client = ghl._getClient();
 
-  logger.info(`extract-workshop-buyers: targeting ${TARGET_COUNT} contacts via pipeline opportunities`);
-  console.log(`\n=== GHL Extract — Workshop Buyers via Pipeline ===`);
+  logger.info(`extract-workshop-buyers: targeting ${TARGET_COUNT} WBs (wb/wb_diamond) via pipeline`);
+  console.log(`\n=== GHL Extract — Workshop Buyers via Pipeline (filtered) ===`);
   console.log(`  Pipeline : ${WORKSHOP_PIPELINE_ID} (2 - Workshops)`);
+  console.log(`  Tags     : wb, wb_diamond`);
   console.log(`  Target   : ${TARGET_COUNT} contacts\n`);
 
   const startTime = Date.now();
 
-  // Step 1 — collect contact IDs from Workshop pipeline opportunities
-  console.log('  Step 1: Collecting contact IDs from Workshop pipeline opportunities...');
-  const contactIds = await ghl.getContactIdsByPipeline({
-    pipelineId: WORKSHOP_PIPELINE_ID,
-    limit: TARGET_COUNT,
-    onProgress: ({ scanned, unique, page }) => {
-      process.stdout.write(`\r    Opportunities scanned: ${scanned} | Unique contacts: ${unique} | Page: ${page}  `);
-    },
-  });
+  const matched = [];
+  const seenIds = new Set();
+  let page = 1;
+  let startAfterId = null;
+  let oppScanned = 0;
+  let contactsFetched = 0;
+  let fetchErrors = 0;
 
-  const elapsedStep1 = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n    Found ${contactIds.length} unique contact IDs in ${elapsedStep1}s`);
+  while (matched.length < TARGET_COUNT) {
+    const params = {
+      location_id: config.ghl.locationId,
+      pipeline_id: WORKSHOP_PIPELINE_ID,
+      limit: 100,
+    };
+    if (startAfterId) params.startAfterId = startAfterId;
 
-  if (contactIds.length === 0) {
-    console.log('\n  No contacts found in Workshop pipeline. Exiting.');
-    process.exit(0);
-  }
-
-  // Step 2 — fetch each contact by ID
-  const toFetch = contactIds.slice(0, TARGET_COUNT);
-  console.log(`\n  Step 2: Fetching ${toFetch.length} contacts by ID...`);
-
-  const contacts = [];
-  const errors = [];
-
-  for (let i = 0; i < toFetch.length; i++) {
-    const contactId = toFetch[i];
+    let response;
     try {
-      const contact = await ghl.getContact(contactId);
-      if (contact) contacts.push(contact);
+      response = await client.get('/opportunities/search', { params });
     } catch (err) {
-      logger.warn(`Failed to fetch contact ${contactId}: ${err.message}`);
-      errors.push({ contactId, error: err.message });
+      throw new Error(`Opportunities page ${page} failed: ${err.message}`);
     }
-    if ((i + 1) % 10 === 0 || i === toFetch.length - 1) {
-      process.stdout.write(`\r    Fetched: ${contacts.length}/${toFetch.length} | Errors: ${errors.length}  `);
+
+    const opportunities = response.data?.opportunities ?? [];
+    const meta = response.data?.meta ?? {};
+    oppScanned += opportunities.length;
+
+    if (opportunities.length === 0) break;
+
+    // Unique contact IDs not yet processed
+    const ids = opportunities
+      .map(o => o.contactId)
+      .filter(id => id && !seenIds.has(id));
+    ids.forEach(id => seenIds.add(id));
+
+    for (const id of ids) {
+      if (matched.length >= TARGET_COUNT) break;
+      try {
+        const contact = await ghl.getContact(id);
+        contactsFetched++;
+        if (contact && (contact.tags ?? []).some(t => BUYER_TAGS.has(t))) {
+          matched.push(contact);
+        }
+      } catch (err) {
+        logger.warn(`skip contact ${id}: ${err.message}`);
+        fetchErrors++;
+      }
+
+      process.stdout.write(
+        `\r  Opps scanned: ${oppScanned} | Fetched: ${contactsFetched} | Matched: ${matched.length}/${TARGET_COUNT} | Page: ${page}  `
+      );
     }
+
+    logger.info(`extract-wb page ${page}: opps=${oppScanned}, fetched=${contactsFetched}, matched=${matched.length}`);
+
+    startAfterId = meta.startAfterId ?? null;
+    if (!startAfterId || opportunities.length < 100) break;
+    page++;
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n\n  Done in ${elapsed}s`);
 
-  // Field coverage check
+  if (matched.length === 0) {
+    console.log('  No Workshop Buyers found. Check pipeline ID and tag names.');
+    process.exit(0);
+  }
+
+  // Field coverage
   const fieldCoverage = {};
-  for (const contact of contacts) {
+  for (const contact of matched) {
     for (const key of Object.keys(contact)) {
       if (contact[key] !== null && contact[key] !== undefined && contact[key] !== '') {
         fieldCoverage[key] = (fieldCoverage[key] ?? 0) + 1;
@@ -101,12 +131,12 @@ async function run() {
   const coveragePct = Object.fromEntries(
     Object.entries(fieldCoverage)
       .sort((a, b) => b[1] - a[1])
-      .map(([k, v]) => [k, `${Math.round((v / contacts.length) * 100)}%`])
+      .map(([k, v]) => [k, `${Math.round((v / matched.length) * 100)}%`])
   );
 
   // Tag distribution
   const tagCounts = {};
-  for (const contact of contacts) {
+  for (const contact of matched) {
     for (const tag of contact.tags ?? []) {
       tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
     }
@@ -118,7 +148,7 @@ async function run() {
 
   // Custom field coverage
   const customFieldCounts = {};
-  for (const contact of contacts) {
+  for (const contact of matched) {
     for (const cf of contact.customFields ?? []) {
       if (cf.value !== null && cf.value !== '' && cf.value !== undefined) {
         customFieldCounts[cf.id] = (customFieldCounts[cf.id] ?? 0) + 1;
@@ -126,22 +156,24 @@ async function run() {
     }
   }
 
-  // Sample of 5 contacts (id, name, tags) for quick verification
-  const sample = contacts.slice(0, 5).map(c => ({
+  // Sample for quick verification
+  const sample = matched.slice(0, 5).map(c => ({
     id: c.id,
     name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
-    tags: c.tags ?? [],
+    tags: (c.tags ?? []).filter(t => BUYER_TAGS.has(t)),
   }));
 
   const report = {
     timestamp: new Date().toISOString(),
-    strategy: 'pipeline-opportunities',
+    strategy: 'pipeline-opportunities-filtered',
     pipelineId: WORKSHOP_PIPELINE_ID,
+    buyerTags: [...BUYER_TAGS],
     config: { targetCount: TARGET_COUNT },
     results: {
-      contactIdsFound: contactIds.length,
-      fetched: contacts.length,
-      errors: errors.length,
+      opportunitiesScanned: oppScanned,
+      contactsFetched: contactsFetched,
+      matchedBuyers: matched.length,
+      fetchErrors,
       elapsedSeconds: parseFloat(elapsed),
     },
     sample,
@@ -149,14 +181,13 @@ async function run() {
     topTags,
     customFieldPopulation: Object.entries(customFieldCounts)
       .sort((a, b) => b[1] - a[1])
-      .map(([id, count]) => ({ id, count, pct: `${Math.round((count / contacts.length) * 100)}%` })),
-    fetchErrors: errors,
+      .map(([id, count]) => ({ id, count, pct: `${Math.round((count / matched.length) * 100)}%` })),
   };
 
   // Save contacts
   mkdirSync(SAMPLES_DIR, { recursive: true });
   const samplesPath = join(SAMPLES_DIR, 'workshop-buyers-sample.json');
-  writeFileSync(samplesPath, JSON.stringify(contacts, null, 2));
+  writeFileSync(samplesPath, JSON.stringify(matched, null, 2));
 
   // Save report
   mkdirSync(REPORTS_DIR, { recursive: true });
@@ -165,21 +196,22 @@ async function run() {
   writeFileSync(reportPath, JSON.stringify(report, null, 2));
 
   console.log(`=== Summary ===`);
-  console.log(`  Contact IDs from pipeline : ${contactIds.length}`);
-  console.log(`  Contacts fetched          : ${contacts.length}`);
-  console.log(`  Fetch errors              : ${errors.length}`);
-  console.log(`  Elapsed                   : ${elapsed}s`);
+  console.log(`  Opportunities scanned : ${oppScanned}`);
+  console.log(`  Contacts fetched      : ${contactsFetched}`);
+  console.log(`  Workshop Buyers found : ${matched.length} (wb/wb_diamond)`);
+  console.log(`  Fetch errors          : ${fetchErrors}`);
+  console.log(`  Elapsed               : ${elapsed}s`);
   console.log(`\n  Contacts : data/samples/workshop-buyers-sample.json`);
   console.log(`  Report   : data/reports/extract-wb-${timestamp}.json`);
 
   if (sample.length > 0) {
-    console.log(`\n  Sample (first 5):`);
+    console.log(`\n  Sample (first 5 — buyer tags only):`);
     for (const s of sample) {
-      console.log(`    ${s.id}  ${s.name.padEnd(30)}  tags: ${s.tags.join(', ') || '(none)'}`);
+      console.log(`    ${s.id}  ${s.name.padEnd(30)}  ${s.tags.join(', ')}`);
     }
   }
 
-  logger.info('extract-workshop-buyers complete', { fetched: contacts.length, elapsed });
+  logger.info('extract-workshop-buyers complete', { matched: matched.length, elapsed });
 }
 
 run().catch(err => {

@@ -1,151 +1,319 @@
 import { logger } from '../utils/logger.js';
+import { resolveEventTags } from './geoResolver.js';
 
 /**
- * GHL field → HubSpot property mapping definitions
- * This is the source of truth for all field transformations
+ * GHL custom field ID → HubSpot property mapping.
+ * GHL returns customFields as [{id, value}] — IDs resolved from /custom-fields/ endpoint.
+ * HubSpot property name is derived from the GHL fieldKey (contact.xxx → xxx).
  *
- * UPDATE THIS MAP after Phase 1 discovery when you've confirmed
- * actual GHL field names from the API/export
+ * Special hubspot values:
+ *   '_hubspot_contact_id' — not written as a property; returned separately for dedup
+ *   '_guest_group_ref'    — not written as a property; returned separately for association pass
  */
-const FIELD_MAP = {
-  // GHL field name          → HubSpot property name + transform
-  'email':                   { hubspot: 'email', transform: null },
-  'firstName':               { hubspot: 'firstname', transform: null },
-  'lastName':                { hubspot: 'lastname', transform: null },
-  'phone':                   { hubspot: 'phone', transform: 'normalizePhone' },
-  'address1':                { hubspot: 'address', transform: null },
-  'city':                    { hubspot: 'city', transform: null },
-  'state':                   { hubspot: 'state', transform: null },
-  'postalCode':              { hubspot: 'zip', transform: null },
+const CUSTOM_FIELD_ID_MAP = {
+  // --- Dedup / Association ---
+  plLjgTFOde5EUxJWWDLl: { hubspot: '_hubspot_contact_id',    transform: null },
+  '0F0eNZMequj4JEf4AdgC': { hubspot: '_guest_group_ref',      transform: null },
 
-  // Custom fields — these map to the new HubSpot custom properties
-  // GHL tag names TBD — update after Phase 1 audit
-  'ghl_geolocation_tag':     { hubspot: 'market_city', transform: 'resolveMarketCity' },
-  'ghl_event_type_tag':      { hubspot: 'event_type', transform: 'resolveEventType' },
-  'ghl_attendance_source':   { hubspot: 'attendance_origin', transform: null },
-  'ghl_buyer_classification':{ hubspot: 'buyer_tier', transform: 'resolveBuyerTier' },
-  'ghl_payment_method':      { hubspot: 'payment_method', transform: null },
-  'ghl_payment_status':      { hubspot: 'payment_status', transform: null },
-  'ghl_utm_source':          { hubspot: 'registration_source', transform: null },
+  // --- Engagement scores (new properties created Day 6) ---
+  agPOPXVU1qhYnjJxPz7V: { hubspot: 'sms_engmt_score',        transform: 'integer' },
+  dW752RjWvFrfBjpeSoTt: { hubspot: 'email_engmt_score',       transform: 'integer' },
+
+  // --- Geography ---
+  XbsASg0C5TDPgSDV2ELo: { hubspot: 'market_name',            transform: null },
+
+  // --- Community ---
+  ZwJCtoQ4rG7eqZCJap0e: { hubspot: 'community_join_date',    transform: 'isoDate' },
+
+  // --- Workshop payment ---
+  '1rnHjHmUbV5XkqyEVVHx': { hubspot: 'workshop_payment_status',  transform: null },
+  '242BK1r5mwKE4NDdEspk': { hubspot: 'workshop_payment_balance', transform: 'decimal' },
+  '2xvxtcUmOpov38NTSDCK': { hubspot: 'workshop_payment_history', transform: null },
+  eDlnaObiYujDnYMw8JWh: { hubspot: 'workshop_paid',              transform: 'decimal' },
+  YZh2Mu66sJeJGrLstXv7: { hubspot: 'workshop_total',             transform: 'decimal' },
+  fIDq2FxIMPoE2S6pSdiz: { hubspot: 'workshop_purchase_date',     transform: 'isoDate' },
+  kTLTRPGnknC02980X6t9: { hubspot: 'workshop_payment_type',      transform: 'multiSelect' },
+  lQyCkSrBQtsO5nOxGgCP: { hubspot: 'payment_transaction_id',     transform: null },
+
+  // --- Preview payment ---
+  crA7d9feEZgISV16vIVs: { hubspot: 'preview_payment_status',  transform: null },
+  NAVv2mYKtw0dUjaECJDa: { hubspot: 'preview_payment_balance', transform: 'decimal' },
+  '5tSC6RTUtYNvLeH3yqSy': { hubspot: 'preview_paid',          transform: 'decimal' },
+  oModmzrZ6Xb6Zi3q4SAq: { hubspot: 'preview_purchase_date',   transform: 'isoDate' },
+  '7XwHuqb1U7MqSw4D3YLt': { hubspot: 'preview_payment_methods', transform: 'multiSelect' },
+  el6MOEH09mMT291Ouhez: { hubspot: 'preview_sales_total',      transform: 'decimal' },
+  '0b6zq88gXLBCNzDP325l': { hubspot: 'preview_invoice_id_payment_id', transform: null },
+  '1AhH8EKwizmtvm2gw45U': { hubspot: 'preview_attendance_status', transform: null },
+
+  // --- Products / coaching ---
+  GbGvpdfbVyeGAvCI1PpX: { hubspot: 'workshop_product_package',             transform: null },
+  WuVyUtalsgS5TPA3OhIF: { hubspot: 'products_purchased',                    transform: 'multiSelect' },
+  LBzOL7RhOiZMgaveKGor: { hubspot: 'number_of_coaching_sessions_purchased', transform: 'integer' },
+  tJH0BERoeDzTDFZpFIZW: { hubspot: 'assigned_coach',                        transform: null },
+  '5ltkMoMxesQAoJzpScck': { hubspot: 'coaching_sessions_fulfilled',          transform: 'multiSelect' },
+
+  // --- Sales reps ---
+  bmw20X9pY8b8FKwEu3ur: { hubspot: 'workshop_team',   transform: 'multiSelect' },
+  sPkhkhdYIas4n3iTuNql: { hubspot: 'preview_sales_rep', transform: 'multiSelect' },
+  XH1v6DpEIkJiC2VEvlDb: { hubspot: 'telesales_repteam', transform: 'multiSelect' },
 };
 
 /**
- * Map a single GHL contact record to HubSpot property format
- *
- * @param {Object} ghlContact - Raw GHL contact object
- * @param {Object} existingHubspotData - Existing HubSpot record (for null protection)
- * @returns {Object} HubSpot-formatted contact properties
+ * Buyer tier tag priority — lower number = higher priority.
+ * When multiple tier tags exist, the highest-priority one wins.
  */
-export function mapContact(ghlContact, existingHubspotData = {}) {
+const BUYER_TIER_TAGS = [
+  { tag: 'wb_diamond',                         value: 'Workshop Buyer - Diamond', priority: 1 },
+  { tag: 'wb',                                  value: 'Workshop Buyer',           priority: 2 },
+  { tag: 'telesales_diamond-elite-program',     value: 'Telesales Diamond Buyer',  priority: 3 },
+  { tag: 'telesales_diamond',                   value: 'Telesales Diamond Buyer',  priority: 3 },
+  { tag: 'telesales_sold',                      value: 'Telesales Buyer',          priority: 4 },
+  { tag: 'phase-preview-buyer',                 value: 'Preview Buyer',            priority: 5 },
+  { tag: 'phase_preview-attendee',              value: 'Preview Attendee',         priority: 6 },
+  { tag: 'phase_preview-reg',                   value: 'Preview Registrant',       priority: 7 },
+  { tag: 'phase_preview-non-attendee',          value: 'Preview Non-Attendee',     priority: 8 },
+  { tag: 'pna',                                 value: 'Preview Non-Attendee',     priority: 8 },
+  { tag: 'community_newmember_directsignup',    value: 'Registrant',               priority: 9 },
+  { tag: 'community_newmember',                 value: 'Registrant',               priority: 9 },
+];
+
+const CANCELLATION_TAG_MAP = {
+  workshop_cancel_reg:      'Workshop Cancelled',
+  foundations_cancel_reg:   'Foundations Cancelled',
+  all_products_cancelled:   'All Cancelled',
+};
+
+/** Fulfillment tags in priority order — highest status wins (single-select property) */
+const FULFILLMENT_PRIORITY = [
+  { tag: 'coaching_user_created_in_tlc',    value: 'Coaching Active' },
+  { tag: 'coaching_sessions_purchased',     value: 'Coaching Purchased' },
+  { tag: 'community-assign-space',          value: 'Community Active' },
+  { tag: 'marketplace_account',             value: 'Marketplace Active' },
+  { tag: 'user_created',                    value: 'Portal Active' },
+  { tag: 'user_subscribed',                 value: 'Subscribed' },
+];
+
+/**
+ * Map a cleaned GHL contact record to HubSpot contact properties.
+ *
+ * Returns:
+ *   properties        — HubSpot property key/value pairs ready for API
+ *   hubspotContactId  — value of GHL's "Hubspot Contact ID" custom field (dedup key)
+ *   guestGroupRef     — value of "Preview Guest - Group" (for later association pass)
+ *
+ * Rules enforced:
+ *   - Blank/null GHL values are never written (caller must protect existing HS data)
+ *   - buyer_tier uses tag priority — highest tier tag wins
+ *   - fulfillment_status uses priority — most advanced status wins
+ *
+ * @param {Object} contact - Cleaned GHL contact (output of cleanRecord)
+ * @returns {{ properties: Object, hubspotContactId: string|null, guestGroupRef: string|null }}
+ */
+export function mapContact(contact) {
   const properties = {};
+  let hubspotContactId = null;
+  let guestGroupRef = null;
 
-  for (const [ghlField, mapping] of Object.entries(FIELD_MAP)) {
-    const rawValue = ghlContact[ghlField];
+  // --- Standard contact fields ---
+  setIfPresent(properties, 'ghl_contact_id', contact.id);
+  setIfPresent(properties, 'firstname',       contact.firstName);
+  setIfPresent(properties, 'lastname',        contact.lastName);
+  setIfPresent(properties, 'email',           contact.email);
+  setIfPresent(properties, 'phone',           contact.phone);
+  setIfPresent(properties, 'company',         contact.companyName);
+  setIfPresent(properties, 'address',         contact.address1);
+  setIfPresent(properties, 'city',            contact.city);
+  setIfPresent(properties, 'state',           contact.state);
+  setIfPresent(properties, 'zip',             contact.postalCode);
+  setIfPresent(properties, 'country',         contact.country);
+  setIfPresent(properties, 'website',         contact.website);
+  setIfPresent(properties, 'hs_timezone',     contact.timezone);
 
-    // CRITICAL: Never overwrite existing HubSpot data with blanks
-    if (rawValue === null || rawValue === undefined || rawValue === '') {
-      continue;
-    }
+  // lifecyclestage — GHL "customer" → HubSpot "customer"
+  if (contact.type) {
+    setIfPresent(properties, 'lifecyclestage', contact.type.toLowerCase());
+  }
 
-    // Apply transformation if defined
-    let value = rawValue;
-    if (mapping.transform) {
-      value = applyTransform(mapping.transform, rawValue, ghlContact);
-    }
+  // DND — if GHL dnd=true the contact is opted out
+  if (contact.dnd === true) {
+    properties.hs_email_optout = true;
+  }
 
-    if (value !== null && value !== undefined) {
+  // registration_source / registration_medium from first attribution entry
+  const firstAttr = Array.isArray(contact.attributionSource)
+    ? contact.attributionSource.find(a => a.isFirst)
+    : contact.attributionSource ?? null;
+  if (firstAttr) {
+    setIfPresent(properties, 'registration_source', firstAttr.utmSource ?? firstAttr.sessionSource);
+    setIfPresent(properties, 'registration_medium', firstAttr.medium);
+  }
+
+  // --- Custom fields (GHL [{id, value}] array) ---
+  const cfLookup = buildCustomFieldLookup(contact.customFields);
+
+  for (const [id, mapping] of Object.entries(CUSTOM_FIELD_ID_MAP)) {
+    const raw = cfLookup[id];
+    if (raw === null || raw === undefined || raw === '' || raw === ' ') continue;
+
+    const value = applyTransform(mapping.transform, raw);
+    if (value === null || value === undefined) continue;
+
+    if (mapping.hubspot === '_hubspot_contact_id') {
+      hubspotContactId = String(value).trim() || null;
+    } else if (mapping.hubspot === '_guest_group_ref') {
+      guestGroupRef = String(value).trim() || null;
+    } else {
       properties[mapping.hubspot] = value;
     }
   }
 
-  return properties;
+  // --- Tags → derived properties ---
+  const tags = contact.tags ?? [];
+  const tagSet = new Set(tags);
+
+  // buyer_tier — highest priority tag wins
+  const buyerTier = resolveBuyerTier(tagSet);
+  if (buyerTier) properties.buyer_tier = buyerTier;
+
+  // cancellation_status — first match wins (contacts rarely have more than one)
+  for (const [tag, value] of Object.entries(CANCELLATION_TAG_MAP)) {
+    if (tagSet.has(tag)) { properties.cancellation_status = value; break; }
+  }
+
+  // fulfillment_status — highest priority match wins
+  const fulfillment = resolveFulfillmentStatus(tagSet);
+  if (fulfillment) properties.fulfillment_status = fulfillment;
+
+  // hs_email_optout override from unsubscribe tag
+  if (tagSet.has('e2i-email unsubscribe')) properties.hs_email_optout = true;
+
+  // eventtag — multi-select of cities attended (Andy's existing field)
+  const { eventtag } = resolveEventTags(tags);
+  if (eventtag) properties.eventtag = eventtag;
+
+  logger.debug(`mapContact [${contact.id}]: ${Object.keys(properties).length} properties mapped`);
+
+  return { properties, hubspotContactId, guestGroupRef };
+}
+
+// --- Helpers ---
+
+/**
+ * Build a flat id→value lookup from GHL customFields array.
+ * @param {Array} customFields
+ * @returns {Object}
+ */
+function buildCustomFieldLookup(customFields = []) {
+  return (customFields ?? []).reduce((acc, cf) => {
+    acc[cf.id] = cf.value;
+    return acc;
+  }, {});
 }
 
 /**
- * Apply a named transformation function to a field value
- * @param {string} transformName
+ * Set a HubSpot property only when the value is non-blank.
+ * @param {Object} props
+ * @param {string} key
  * @param {*} value
- * @param {Object} fullRecord - Full GHL record for context-dependent transforms
- * @returns {*} Transformed value
  */
-function applyTransform(transformName, value, fullRecord) {
-  switch (transformName) {
-    case 'normalizePhone':
-      return normalizePhone(value);
-    case 'resolveMarketCity':
-      return resolveMarketCity(value, fullRecord);
-    case 'resolveEventType':
-      return resolveEventType(value);
-    case 'resolveBuyerTier':
-      return resolveBuyerTier(value);
-    default:
-      logger.warn(`Unknown transform: ${transformName}`);
-      return value;
+function setIfPresent(props, key, value) {
+  if (value !== null && value !== undefined && value !== '') {
+    props[key] = value;
   }
-}
-
-// --- Transform functions (update after Phase 1 discovery) ---
-
-function normalizePhone(phone) {
-  if (!phone) return null;
-  // Strip everything except digits and leading +
-  const cleaned = phone.replace(/[^\d+]/g, '');
-  // TODO: Add country code logic if needed
-  return cleaned || null;
 }
 
 /**
- * Resolve GHL geolocation tags to market_city dropdown values
- * GHL uses tags like "Orlando Workshop", "Fort Myers Manual Override"
- * This needs to extract the city name and check for manual override flag
- *
- * @param {string} geoTag - GHL geolocation tag value
- * @param {Object} fullRecord - Full record to check override flags
- * @returns {string|null} HubSpot market_city value
+ * Apply a named transformation to a raw GHL field value.
+ * @param {string|null} transformName
+ * @param {*} value
+ * @returns {*}
  */
-function resolveMarketCity(geoTag, fullRecord) {
-  // TODO: Build complete mapping after reviewing actual GHL tag values
-  const CITY_MAP = {
-    'orlando': 'Orlando',
-    'fort myers': 'Fort Myers',
-    'fort_myers': 'Fort Myers',
-    'tampa': 'Tampa',
-    'miami': 'Miami',
-    'jacksonville': 'Jacksonville',
-    // Add more after Phase 1 audit
-  };
-
-  if (!geoTag) return null;
-  const normalized = geoTag.toLowerCase().trim();
-
-  for (const [key, value] of Object.entries(CITY_MAP)) {
-    if (normalized.includes(key)) return value;
+function applyTransform(transformName, value) {
+  switch (transformName) {
+    case 'integer':     return toInteger(value);
+    case 'decimal':     return toDecimal(value);
+    case 'isoDate':     return toIsoDate(value);
+    case 'multiSelect': return toHubspotMultiSelect(value);
+    default:            return value;
   }
+}
 
-  logger.warn(`Unmapped market city tag: "${geoTag}"`);
+/** @param {*} v @returns {number|null} */
+function toInteger(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = parseInt(String(v).replace(/[^\d-]/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+/** @param {*} v @returns {number|null} */
+function toDecimal(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = parseFloat(String(v).replace(/[^\d.-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+/**
+ * Convert GHL date values to ISO YYYY-MM-DD.
+ * Handles: Unix ms number, "YYYY-MM-DD", "M/D/YYYY", "MM/DD/YYYY".
+ * @param {number|string} v
+ * @returns {string|null}
+ */
+function toIsoDate(v) {
+  if (v === null || v === undefined || v === '') return null;
+  // Unix ms (community_join_date may arrive as a number)
+  if (typeof v === 'number') return new Date(v).toISOString().split('T')[0];
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const mmddyyyy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (mmddyyyy) {
+    const [, m, d, y] = mmddyyyy;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  logger.warn(`toIsoDate: unrecognised date format "${s}"`);
   return null;
 }
 
-function resolveEventType(value) {
-  // TODO: Map GHL event tags to dropdown values
-  const EVENT_MAP = {
-    'workshop': 'Workshop',
-    'preview': 'Preview',
-    'masterclass': 'Masterclass',
-  };
-  const normalized = (value || '').toLowerCase().trim();
-  return EVENT_MAP[normalized] || null;
+/**
+ * Convert GHL MULTIPLE_OPTIONS values to HubSpot semicolon-separated string.
+ * GHL may return an array or a semicolon/comma-separated string.
+ * @param {string[]|string} v
+ * @returns {string|null}
+ */
+function toHubspotMultiSelect(v) {
+  if (!v) return null;
+  if (Array.isArray(v)) return v.filter(Boolean).join(';') || null;
+  if (typeof v === 'string') {
+    // Normalise comma-separated to semicolon
+    return v.split(',').map(s => s.trim()).filter(Boolean).join(';') || null;
+  }
+  return null;
 }
 
-function resolveBuyerTier(value) {
-  const TIER_MAP = {
-    'buyer': 'Workshop Buyer',
-    'workshop buyer': 'Workshop Buyer',
-    'preview buyer': 'Preview Buyer',
-    'registrant': 'Registrant',
-  };
-  const normalized = (value || '').toLowerCase().trim();
-  return TIER_MAP[normalized] || null;
+/**
+ * Resolve the highest-priority buyer tier from a contact's tag set.
+ * @param {Set<string>} tagSet
+ * @returns {string|null}
+ */
+function resolveBuyerTier(tagSet) {
+  let best = null;
+  for (const entry of BUYER_TIER_TAGS) {
+    if (tagSet.has(entry.tag)) {
+      if (!best || entry.priority < best.priority) best = entry;
+    }
+  }
+  return best?.value ?? null;
 }
 
-export { FIELD_MAP };
+/**
+ * Resolve the highest-priority fulfillment status from a contact's tag set.
+ * @param {Set<string>} tagSet
+ * @returns {string|null}
+ */
+function resolveFulfillmentStatus(tagSet) {
+  for (const entry of FULFILLMENT_PRIORITY) {
+    if (tagSet.has(entry.tag)) return entry.value;
+  }
+  return null;
+}
+
+export { CUSTOM_FIELD_ID_MAP, BUYER_TIER_TAGS };

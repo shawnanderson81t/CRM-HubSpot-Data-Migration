@@ -1,48 +1,90 @@
 import { logger } from '../utils/logger.js';
 
 /**
- * Detect duplicates within a batch and against existing HubSpot records
- * Match logic: email OR phone (configurable)
+ * Classify a batch of mapped GHL contacts against existing HubSpot records.
  *
- * @param {Array} records - Array of cleaned contact records
- * @param {Map} existingMap - Map of email/phone → HubSpot contact ID (pre-loaded)
- * @returns {{ unique: Array, duplicates: Array, updates: Array }}
+ * Match chain (highest confidence first):
+ *   1. hubspotContactId — GHL stores the HS contact ID in a custom field.
+ *      If present, this is a direct match: always UPDATE, skip email/phone lookup.
+ *   2. email — normalised lowercase match in existingMap
+ *   3. phone — E.164 match in existingMap
+ *
+ * Since Andy's team has already loaded Workshop contacts into HubSpot,
+ * Tier 1 records are expected to be nearly all UPDATEs. Records with no
+ * match key (no email AND no phone AND no hubspotContactId) are flagged
+ * for manual review rather than being created blindly.
+ *
+ * @param {Array<{contact: Object, properties: Object, hubspotContactId: string|null}>} records
+ *   Each element is the output of mapContact(), wrapped with the original contact.
+ * @param {Map<string, string>} existingMap
+ *   Map of normalised email|phone → HubSpot contact ID, pre-loaded from HubSpot.
+ * @returns {{
+ *   updates: Array<{properties: Object, hubspotId: string, matchedOn: string}>,
+ *   inserts: Array<{properties: Object}>,
+ *   unresolvable: Array<{contact: Object, reason: string}>
+ * }}
  */
 export function deduplicateBatch(records, existingMap = new Map()) {
-  const seen = new Map();
-  const unique = [];
-  const duplicates = [];
-  const updates = []; // Records that match existing HubSpot contacts (upsert)
+  const updates = [];
+  const inserts = [];
+  const unresolvable = [];
 
-  for (const record of records) {
-    const email = (record.email || '').toLowerCase().trim();
-    const phone = (record.phone || '').replace(/\D/g, '');
-    const key = email || phone;
-
-    if (!key) {
-      duplicates.push({ record, reason: 'No email or phone — cannot deduplicate' });
+  for (const { contact, properties, hubspotContactId } of records) {
+    // 1. Direct HS contact ID match (highest confidence)
+    if (hubspotContactId) {
+      updates.push({ properties, hubspotId: hubspotContactId, matchedOn: 'hubspot_contact_id' });
       continue;
     }
 
-    // Check against existing HubSpot data
-    const existingId = existingMap.get(email) || existingMap.get(phone);
-    if (existingId) {
-      updates.push({ record, hubspotId: existingId, matchedOn: existingMap.has(email) ? 'email' : 'phone' });
+    const email = (contact.email || '').toLowerCase().trim();
+    const phone = (contact.phone || '').trim();
+
+    // 2. Email match
+    if (email && existingMap.has(email)) {
+      updates.push({ properties, hubspotId: existingMap.get(email), matchedOn: 'email' });
       continue;
     }
 
-    // Check within this batch
-    if (seen.has(key)) {
-      duplicates.push({ record, reason: `Duplicate of ${key} within batch` });
+    // 3. Phone match
+    if (phone && existingMap.has(phone)) {
+      updates.push({ properties, hubspotId: existingMap.get(phone), matchedOn: 'phone' });
       continue;
     }
 
-    seen.set(key, true);
-    if (email) seen.set(email, true);
-    if (phone) seen.set(phone, true);
-    unique.push(record);
+    // 4. No match — treat as INSERT only if we have at least an email or phone
+    if (email || phone) {
+      inserts.push({ properties });
+      continue;
+    }
+
+    // 5. No match key at all — flag for review
+    unresolvable.push({
+      contact: { id: contact.id, firstName: contact.firstName, lastName: contact.lastName },
+      reason: 'No hubspotContactId, email, or phone — cannot match or create safely',
+    });
   }
 
-  logger.info(`Dedup results: ${unique.length} new, ${updates.length} updates, ${duplicates.length} skipped`);
-  return { unique, duplicates, updates };
+  logger.info(
+    `dedup: ${updates.length} updates, ${inserts.length} inserts, ${unresolvable.length} unresolvable`
+  );
+
+  return { updates, inserts, unresolvable };
+}
+
+/**
+ * Build the existingMap from a HubSpot contact search result set.
+ * Indexes by both email and phone so either can match.
+ *
+ * @param {Array<{id: string, properties: {email: string, phone: string}}>} hubspotContacts
+ * @returns {Map<string, string>} key → HubSpot contact ID
+ */
+export function buildExistingMap(hubspotContacts) {
+  const map = new Map();
+  for (const hs of hubspotContacts) {
+    const email = (hs.properties?.email || '').toLowerCase().trim();
+    const phone = (hs.properties?.phone || '').trim();
+    if (email) map.set(email, hs.id);
+    if (phone) map.set(phone, hs.id);
+  }
+  return map;
 }

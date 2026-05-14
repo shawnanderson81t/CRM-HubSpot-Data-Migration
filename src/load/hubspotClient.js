@@ -101,9 +101,12 @@ export class HubSpotClient {
       return { succeeded: (data.results || []).length, failed: 0, errors: [] };
     } catch (err) {
       logger.error('batchCreateContacts failed', {
-        status: err.response?.status,
-        detail: err.response?.data?.message,
-        count: records.length,
+        status:   err.response?.status,
+        detail:   err.response?.data?.message || JSON.stringify(err.response?.data),
+        message:  err.message,
+        code:     err.code,
+        count:    records.length,
+        sample:   inputs[0],
       });
       return {
         succeeded: 0,

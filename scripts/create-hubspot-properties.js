@@ -1,6 +1,6 @@
 /**
- * Creates the 7 HubSpot contact properties missing from the schema audit (May 12, 2026)
- * and adds 4 new options to the existing event_type property.
+ * Creates all HubSpot contact properties needed for the GHL migration.
+ * Covers both our new properties AND Andy's PROD custom properties (for sandbox sync).
  *
  * Idempotent — safe to run multiple times. Skips anything that already exists.
  * Writes a JSON report to data/reports/property-setup-[timestamp].json
@@ -25,18 +25,15 @@ const headers = {
   'Content-Type': 'application/json',
 };
 
-/**
- * 7 properties confirmed missing from HubSpot after schema audit.
- * All other properties (29) already exist from Andy's Oct 2025 migration.
- */
 const PROPERTIES_TO_CREATE = [
+  // --- Our new properties ---
   {
-    name: 'ghl_contact_id',
-    label: 'GHL Contact ID',
+    name: 'engager_contact_id',
+    label: 'Engager Contact ID',
     type: 'string',
     fieldType: 'text',
     groupName: 'contactinformation',
-    description: 'Original GoHighLevel contact ID — rollback key and highest-confidence dedup anchor',
+    description: 'Original GoHighLevel/Engager contact ID — rollback key and highest-confidence dedup anchor',
     options: [],
   },
   {
@@ -59,21 +56,21 @@ const PROPERTIES_TO_CREATE = [
     ],
   },
   {
-    name: 'registration_source',
-    label: 'Registration Source',
+    name: 'utm_source',
+    label: 'UTM Source',
     type: 'string',
     fieldType: 'text',
     groupName: 'contactinformation',
-    description: 'Original registration source from GHL attributions (utmSessionSource)',
+    description: 'Registration source from first GHL attribution (utmSource / sessionSource)',
     options: [],
   },
   {
-    name: 'registration_medium',
-    label: 'Registration Medium',
+    name: 'utm_medium',
+    label: 'UTM Medium',
     type: 'string',
     fieldType: 'text',
     groupName: 'contactinformation',
-    description: 'Original registration medium from GHL attributions (e.g. facebook, zapier, form)',
+    description: 'Registration medium from first GHL attribution (e.g. facebook, zapier, form)',
     options: [],
   },
   {
@@ -82,7 +79,7 @@ const PROPERTIES_TO_CREATE = [
     type: 'date',
     fieldType: 'date',
     groupName: 'contactinformation',
-    description: 'Date the contact joined the TLC community (from GHL Community Join Date custom field)',
+    description: 'Date the contact joined the TLC community',
     options: [],
   },
   {
@@ -93,7 +90,7 @@ const PROPERTIES_TO_CREATE = [
     groupName: 'contactinformation',
     description: 'Cancellation type derived from GHL tags',
     options: [
-      { label: 'Workshop Cancelled',   value: 'Workshop Cancelled',   displayOrder: 0, hidden: false },
+      { label: 'Workshop Cancelled',    value: 'Workshop Cancelled',    displayOrder: 0, hidden: false },
       { label: 'Foundations Cancelled', value: 'Foundations Cancelled', displayOrder: 1, hidden: false },
       { label: 'All Cancelled',         value: 'All Cancelled',         displayOrder: 2, hidden: false },
     ],
@@ -113,6 +110,189 @@ const PROPERTIES_TO_CREATE = [
       { label: 'Marketplace Active', value: 'Marketplace Active', displayOrder: 4, hidden: false },
       { label: 'Subscribed',         value: 'Subscribed',         displayOrder: 5, hidden: false },
     ],
+  },
+
+  // --- Andy's PROD properties (needed in sandbox for pilot testing) ---
+  // These use string/text so sandbox accepts semicolon-separated multi-values without needing exact option lists.
+  {
+    name: 'products_purchased',
+    label: 'Products Purchased',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Products purchased by the contact (multi-value from GHL)',
+    options: [],
+  },
+  {
+    name: 'workshop_team',
+    label: 'Workshop Team',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Workshop sales team assignment',
+    options: [],
+  },
+  {
+    name: 'workshop_product_package',
+    label: 'Workshop Product Package',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Workshop product package selected',
+    options: [],
+  },
+  {
+    name: 'eventtag',
+    label: 'Event Tag',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Event city tags (semicolon-separated) from GHL geo resolver',
+    options: [],
+  },
+  {
+    name: 'workshop_paid',
+    label: 'Workshop Paid',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'Amount paid toward workshop',
+    options: [],
+  },
+  {
+    name: 'workshop_payment_type',
+    label: 'Workshop Payment Type',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Workshop payment method(s)',
+    options: [],
+  },
+  {
+    name: 'workshop_payment_status',
+    label: 'Workshop Payment Status',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Current workshop payment status',
+    options: [],
+  },
+  {
+    name: 'workshop_payment_balance',
+    label: 'Workshop Payment Balance',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'Remaining balance owed for workshop',
+    options: [],
+  },
+  {
+    name: 'workshop_payment_history',
+    label: 'Workshop Payment History',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Full payment history log for workshop',
+    options: [],
+  },
+  {
+    name: 'workshop_total',
+    label: 'Workshop Total',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'Total workshop purchase price',
+    options: [],
+  },
+  {
+    name: 'workshop_purchase_date',
+    label: 'Workshop Purchase Date',
+    type: 'date',
+    fieldType: 'date',
+    groupName: 'contactinformation',
+    description: 'Date the workshop was purchased',
+    options: [],
+  },
+  {
+    name: 'preview_payment_status',
+    label: 'Preview Payment Status',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Current preview event payment status',
+    options: [],
+  },
+  {
+    name: 'preview_payment_methods',
+    label: 'Preview Payment Methods',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Payment methods used for preview purchase',
+    options: [],
+  },
+  {
+    name: 'preview_sales_total',
+    label: 'Preview Sales Total',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'Total preview sales amount',
+    options: [],
+  },
+  {
+    name: 'preview_purchase_date',
+    label: 'Preview Purchase Date',
+    type: 'date',
+    fieldType: 'date',
+    groupName: 'contactinformation',
+    description: 'Date the preview was purchased',
+    options: [],
+  },
+  {
+    name: 'preview_attendance_status',
+    label: 'Preview Attendance Status',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Preview event attendance status',
+    options: [],
+  },
+  {
+    name: 'preview_sales_rep',
+    label: 'Preview Sales Rep',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Sales rep assigned to preview purchase',
+    options: [],
+  },
+  {
+    name: 'market_name',
+    label: 'Market Name',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Geographic market name from GHL geo custom field',
+    options: [],
+  },
+  {
+    name: 'sms_engmt_score',
+    label: 'SMS Engagement Score',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'SMS engagement score from GHL',
+    options: [],
+  },
+  {
+    name: 'email_engmt_score',
+    label: 'Email Engagement Score',
+    type: 'number',
+    fieldType: 'number',
+    groupName: 'contactinformation',
+    description: 'Email engagement score from GHL',
+    options: [],
   },
 ];
 

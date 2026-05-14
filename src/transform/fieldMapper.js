@@ -127,7 +127,7 @@ export function mapContact(contact) {
   setIfPresent(properties, 'zip',             contact.postalCode);
   setIfPresent(properties, 'country',         contact.country);
   setIfPresent(properties, 'website',         contact.website);
-  setIfPresent(properties, 'hs_timezone',     contact.timezone);
+  setIfPresent(properties, 'hs_timezone',     toHubspotTimezone(contact.timezone));
 
   // lifecyclestage — GHL "customer" → HubSpot "customer"
   if (contact.type) {
@@ -236,6 +236,18 @@ function applyTransform(transformName, value) {
     case 'multiSelect': return toHubspotMultiSelect(value);
     default:            return value;
   }
+}
+
+/**
+ * Convert IANA timezone string to HubSpot hs_timezone format.
+ * HubSpot expects lowercase with "/" replaced by "_slash_".
+ * e.g. "America/Denver" → "america_slash_denver"
+ * @param {string|null|undefined} tz
+ * @returns {string|null}
+ */
+function toHubspotTimezone(tz) {
+  if (!tz) return null;
+  return tz.toLowerCase().replace(/\//g, '_slash_');
 }
 
 /** @param {*} v @returns {number|null} */

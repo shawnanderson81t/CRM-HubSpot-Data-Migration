@@ -115,7 +115,7 @@ export function mapContact(contact) {
   let guestGroupRef = null;
 
   // --- Standard contact fields ---
-  setIfPresent(properties, 'ghl_contact_id', contact.id);
+  setIfPresent(properties, 'engager_contact_id', contact.id);
   setIfPresent(properties, 'firstname',       contact.firstName);
   setIfPresent(properties, 'lastname',        contact.lastName);
   setIfPresent(properties, 'email',           contact.email);
@@ -144,8 +144,8 @@ export function mapContact(contact) {
     ? contact.attributionSource.find(a => a.isFirst)
     : contact.attributionSource ?? null;
   if (firstAttr) {
-    setIfPresent(properties, 'registration_source', firstAttr.utmSource ?? firstAttr.sessionSource);
-    setIfPresent(properties, 'registration_medium', firstAttr.medium);
+    setIfPresent(properties, 'utm_source', firstAttr.utmSource ?? firstAttr.sessionSource);
+    setIfPresent(properties, 'utm_medium', firstAttr.medium);
   }
 
   // --- Custom fields (GHL [{id, value}] array) ---

@@ -18,6 +18,8 @@
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",
     "create-properties": "node scripts/create-hubspot-properties.js",
+    "build:owner-map": "node scripts/build-owner-map.js",
+    "sample:opportunity": "node scripts/sample-opportunity.js",
     "migrate:tier1": "node scripts/migrate-tier.js --tier=1",
     "migrate:tier2": "node scripts/migrate-tier.js --tier=2",
     "migrate:tier3": "node scripts/migrate-tier.js --tier=3",

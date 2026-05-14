@@ -1,17 +1,25 @@
 import 'dotenv/config';
+import { readFileSync } from 'fs';
 import { loadConfig } from '../src/utils/config.js';
+import { HubSpotClient } from '../src/load/hubspotClient.js';
 import { Checkpoint } from '../src/load/checkpoint.js';
+import { BatchUpserter } from '../src/load/batchUpserter.js';
 import { logger } from '../src/utils/logger.js';
 
 /**
- * Run migration for a specific tier
+ * Main migration runner.
  *
  * Usage:
- *   node scripts/migrate-tier.js --tier=1    # Workshop Buyers (~10K)
- *   node scripts/migrate-tier.js --tier=2    # Preview Buyers (~40K)
- *   node scripts/migrate-tier.js --tier=3    # General Registrants (~800K)
+ *   node scripts/migrate-tier.js --tier=1    # Workshop Buyers  (~10K)
+ *   node scripts/migrate-tier.js --tier=2    # Preview Buyers   (~30K)
+ *   node scripts/migrate-tier.js --tier=3    # Registrants      (~800K)
  *
- * Supports resume: if interrupted, re-run same command to continue from last checkpoint
+ * Resume: re-run the same command after a failure — checkpoint picks up from last batch.
+ *
+ * Pre-requisites:
+ *   1. Data file for the tier must exist (run extract scripts first)
+ *   2. data/owner-map.json should exist (run scripts/build-owner-map.js first)
+ *   3. HUBSPOT_API_KEY must point to the correct portal (sandbox for pilot, PROD for live)
  */
 
 const TIER = parseInt(
@@ -19,9 +27,18 @@ const TIER = parseInt(
 );
 
 const TIER_CONFIG = {
-  1: { name: 'Workshop Buyers', estimatedCount: 10000, batchSize: 100 },
-  2: { name: 'Preview Buyers', estimatedCount: 40000, batchSize: 100 },
-  3: { name: 'General Registrants', estimatedCount: 800000, batchSize: 100 },
+  1: {
+    name: 'Workshop Buyers',
+    dataFile: './data/samples/workshop-buyers-sample.json',
+  },
+  2: {
+    name: 'Preview Buyers',
+    dataFile: './data/samples/preview-buyers.json',
+  },
+  3: {
+    name: 'General Registrants',
+    dataFile: './data/samples/registrants.json',
+  },
 };
 
 async function main() {
@@ -33,33 +50,49 @@ async function main() {
     process.exit(1);
   }
 
-  logger.info(`Starting Tier ${TIER}: ${tierInfo.name} (~${tierInfo.estimatedCount} contacts)`);
+  logger.info(`=== Tier ${TIER} Migration: ${tierInfo.name} ===`);
 
-  // Initialize checkpoint for resume support
-  const totalBatches = Math.ceil(tierInfo.estimatedCount / tierInfo.batchSize);
-  const checkpoint = new Checkpoint(TIER, config.paths.checkpointDir);
-  const state = checkpoint.load(totalBatches);
+  // Load pre-extracted contacts
+  let allContacts;
+  try {
+    allContacts = JSON.parse(readFileSync(tierInfo.dataFile, 'utf-8'));
+  } catch (err) {
+    logger.error(`Cannot read data file: ${tierInfo.dataFile}`, { error: err.message });
+    logger.error('Run the extract script first to generate this file.');
+    process.exit(1);
+  }
+  logger.info(`Loaded ${allContacts.length} contacts from ${tierInfo.dataFile}`);
 
-  const startBatch = state.lastBatch + 1;
-  logger.info(`Resuming from batch ${startBatch}/${totalBatches}`);
+  // Load owner map (GHL userId → HubSpot ownerId) — optional but recommended
+  let ownerMap = {};
+  try {
+    ownerMap = JSON.parse(readFileSync('./data/owner-map.json', 'utf-8'));
+    logger.info(`Owner map loaded: ${Object.keys(ownerMap).length} entries`);
+  } catch {
+    logger.warn('No owner map at data/owner-map.json — contacts will have no owner assigned. Run scripts/build-owner-map.js first.');
+  }
 
-  // TODO: Implement the actual migration loop
-  // for (let i = startBatch; i < totalBatches; i++) {
-  //   1. Extract batch of contacts from GHL (offset = i * batchSize)
-  //   2. Clean each record
-  //   3. Map fields
-  //   4. Deduplicate against HubSpot
-  //   5. Batch upsert to HubSpot
-  //   6. Log results
-  //   7. Update checkpoint
-  //   8. Wait (batchDelayMs) to respect rate limits
-  // }
+  const hubspotClient = new HubSpotClient(config);
+  const checkpoint    = new Checkpoint(TIER, config.paths.checkpointDir);
+  const upserter      = new BatchUpserter(hubspotClient, checkpoint, config, ownerMap);
 
-  checkpoint.complete(state);
-  logger.info(`Tier ${TIER} migration complete`);
+  const finalState = await upserter.run(allContacts, `tier${TIER}`);
+
+  logger.info(`=== Tier ${TIER} Complete ===`, {
+    succeeded: finalState.succeeded,
+    failed:    finalState.failed,
+    skipped:   finalState.skipped,
+    started:   finalState.startedAt,
+    finished:  finalState.completedAt,
+  });
+
+  if (finalState.failed > 0) {
+    logger.warn(`${finalState.failed} contacts failed — check data/checkpoints/tier-${TIER}-checkpoint.json for details`);
+    process.exit(1);
+  }
 }
 
-main().catch((e) => {
-  logger.error(`Tier ${TIER} migration failed`, { error: e.message, stack: e.stack });
+main().catch(err => {
+  logger.error(`Tier ${TIER} migration crashed`, { error: err.message, stack: err.stack });
   process.exit(1);
 });

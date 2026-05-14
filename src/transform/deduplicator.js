@@ -83,8 +83,10 @@ export function buildExistingMap(hubspotContacts) {
   for (const hs of hubspotContacts) {
     const email = (hs.properties?.email || '').toLowerCase().trim();
     const phone = (hs.properties?.phone || '').trim();
+    const engagerId = (hs.properties?.engager_contact_id || '').trim();
     if (email) map.set(email, hs.id);
     if (phone) map.set(phone, hs.id);
+    if (engagerId) map.set(engagerId, hs.id);
   }
   return map;
 }

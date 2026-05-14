@@ -134,10 +134,9 @@ export function mapContact(contact) {
     setIfPresent(properties, 'lifecyclestage', contact.type.toLowerCase());
   }
 
-  // DND — if GHL dnd=true the contact is opted out
-  if (contact.dnd === true) {
-    properties.hs_email_optout = true;
-  }
+  // DND / hs_email_optout intentionally skipped:
+  // HubSpot treats hs_email_optout as read-only on the contacts API.
+  // Opt-out state must be managed via the Email Subscriptions API (/communication-preferences/v3).
 
   // registration_source / registration_medium from first attribution entry
   const firstAttr = Array.isArray(contact.attributionSource)
@@ -184,8 +183,7 @@ export function mapContact(contact) {
   const fulfillment = resolveFulfillmentStatus(tagSet);
   if (fulfillment) properties.fulfillment_status = fulfillment;
 
-  // hs_email_optout override from unsubscribe tag
-  if (tagSet.has('e2i-email unsubscribe')) properties.hs_email_optout = true;
+  // 'e2i-email unsubscribe' tag → opt-out handled separately via Subscriptions API
 
   // eventtag — multi-select of cities attended (Andy's existing field)
   const { eventtag } = resolveEventTags(tags);

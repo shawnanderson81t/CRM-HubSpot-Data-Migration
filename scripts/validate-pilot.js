@@ -23,15 +23,22 @@ const COUNT = parseInt(
 
 // Properties to fetch back from HubSpot for comparison
 const PROPS_TO_FETCH = [
-  'email', 'firstname', 'lastname', 'phone',
+  // Standard contact fields
+  'email', 'firstname', 'lastname', 'phone', 'company', 'website',
+  'address', 'city', 'state', 'zip', 'country', 'hs_timezone', 'lifecyclestage',
+  // Our custom / migration fields
   'engager_contact_id', 'buyer_tier', 'fulfillment_status', 'cancellation_status',
-  'utm_source', 'utm_medium', 'market_name', 'eventtag', 'hs_timezone',
+  'utm_source', 'utm_medium', 'market_name', 'eventtag',
+  'community_join_date', 'assigned_coach', 'telesales_repteam',
   'workshop_paid', 'workshop_total', 'workshop_payment_status', 'workshop_payment_balance',
   'workshop_purchase_date', 'workshop_payment_type', 'workshop_product_package',
+  'workshop_team', 'workshop_payment_history',
   'preview_payment_status', 'preview_sales_total', 'preview_purchase_date',
   'preview_attendance_status', 'preview_sales_rep', 'preview_payment_methods',
-  'products_purchased', 'workshop_team', 'sms_engmt_score', 'email_engmt_score',
-  'lifecyclestage',
+  'preview_paid', 'preview_payment_balance',
+  'products_purchased', 'sms_engmt_score', 'email_engmt_score',
+  'number_of_coaching_sessions_purchased', 'coaching_sessions_fulfilled',
+  'payment_transaction_id',
 ];
 
 // Numeric fields — HubSpot returns them as strings; compare as numbers

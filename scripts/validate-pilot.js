@@ -110,7 +110,7 @@ async function main() {
   // Build expected map: email → expected properties
   const expectedByEmail = new Map();
   for (const raw of contacts) {
-    const cleaned = cleanRecord(raw);
+    const { cleaned } = cleanRecord(raw);
     const { properties } = mapContact(cleaned);
     const email = (properties.email || '').toLowerCase().trim();
     if (email) expectedByEmail.set(email, properties);

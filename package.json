@@ -23,6 +23,7 @@
     "migrate:tier1": "node scripts/migrate-tier.js --tier=1",
     "migrate:tier2": "node scripts/migrate-tier.js --tier=2",
     "migrate:tier3": "node scripts/migrate-tier.js --tier=3",
+    "validate:pilot": "node scripts/validate-pilot.js",
     "test": "node --test src/**/*.test.js"
   },
   "dependencies": {

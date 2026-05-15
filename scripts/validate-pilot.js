@@ -47,9 +47,19 @@ const NUMERIC_FIELDS = new Set([
   'sms_engmt_score', 'email_engmt_score',
 ]);
 
+// Fields deliberately stripped from update payloads (see batchUpserter.js).
+// PROD has duplicate contacts that would cause uniqueness violations if we wrote
+// these. Validation skips them entirely — blank/mismatch is expected and correct.
+const SKIP_ON_UPDATE = new Set([
+  'email', 'phone', 'engager_contact_id',
+]);
+
 // Fields where a mismatch is a WARNING (not a hard FAIL) — e.g. optional enrichment
 const WARN_ONLY_FIELDS = new Set([
   'utm_source', 'utm_medium', 'cancellation_status',
+  // PROD has custom lifecycle stage IDs (e.g. 2107021006) — overwriting with "customer"
+  // needs explicit sign-off; treat as warn until confirmed with Andy's team.
+  'lifecyclestage',
 ]);
 
 /**
@@ -61,6 +71,7 @@ function compareContact(email, expected, actual) {
 
   for (const [key, expVal] of Object.entries(expected)) {
     if (key === 'hubspot_owner_id') continue; // owner map was empty for sandbox pilot
+    if (SKIP_ON_UPDATE.has(key)) continue;    // intentionally not written during updates
 
     const actVal = actual[key];
 

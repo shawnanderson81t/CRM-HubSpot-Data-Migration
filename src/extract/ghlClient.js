@@ -4,6 +4,30 @@ import { logger } from '../utils/logger.js';
 const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
 const GHL_VERSION  = process.env.GHL_VERSION  || '2021-07-28';
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Retry an async fn up to maxAttempts times, backing off on 429.
+ * Respects Retry-After header when present.
+ */
+async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 2000 } = {}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 429 && attempt < maxAttempts) {
+        const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '0', 10);
+        const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelayMs * attempt;
+        logger.warn(`GHL 429 rate limit — retry ${attempt}/${maxAttempts - 1} in ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 /**
  * GoHighLevel REST API client
  * Auth: Private Integration Token used directly as Bearer (GHL Settings > Private Integrations)
@@ -50,7 +74,7 @@ export class GHLClient {
   async getContact(contactId) {
     const client = this._getClient();
     try {
-      const response = await client.get(`/contacts/${contactId}`);
+      const response = await withRetry(() => client.get(`/contacts/${contactId}`));
       return response.data?.contact ?? response.data;
     } catch (err) {
       throw new Error(`Failed to fetch contact ${contactId}: ${err.message}`);

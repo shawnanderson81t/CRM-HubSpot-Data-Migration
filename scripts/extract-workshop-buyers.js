@@ -25,6 +25,24 @@ import { loadConfig } from '../src/utils/config.js';
 import { GHLClient } from '../src/extract/ghlClient.js';
 import { logger } from '../src/utils/logger.js';
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function fetchOppsPage(client, params, retries = 5) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await client.get('/opportunities/search', { params });
+    } catch (err) {
+      if (err.response?.status === 429 && attempt < retries) {
+        const delay = 2000 * attempt;
+        logger.warn(`GHL 429 on opps page ${params.page} — retry ${attempt} in ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(`Opportunities page ${params.page} failed: ${err.message}`);
+    }
+  }
+}
+
 dotenv.config();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -67,12 +85,7 @@ async function run() {
       page,
     };
 
-    let response;
-    try {
-      response = await client.get('/opportunities/search', { params });
-    } catch (err) {
-      throw new Error(`Opportunities page ${page} failed: ${err.message}`);
-    }
+    const response = await fetchOppsPage(client, params);
 
     const opportunities = response.data?.opportunities ?? [];
     oppScanned += opportunities.length;
@@ -101,6 +114,7 @@ async function run() {
       process.stdout.write(
         `\r  Opps scanned: ${oppScanned} | Fetched: ${contactsFetched} | Matched: ${matched.length}/${TARGET_COUNT} | Page: ${page}  `
       );
+      await sleep(150); // stay under GHL's ~10 req/s rate limit
     }
 
     logger.info(`extract-wb page ${page}: opps=${oppScanned}, fetched=${contactsFetched}, matched=${matched.length}`);

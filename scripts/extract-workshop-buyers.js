@@ -32,7 +32,12 @@ async function fetchOppsPage(client, params, retries = 5) {
     try {
       return await client.get('/opportunities/search', { params });
     } catch (err) {
-      if (err.response?.status === 429 && attempt < retries) {
+      const status = err.response?.status;
+      if (status === 400) {
+        // GHL returns 400 (not an empty array) when page is past the end of results
+        return { data: { opportunities: [] } };
+      }
+      if (status === 429 && attempt < retries) {
         const delay = 2000 * attempt;
         logger.warn(`GHL 429 on opps page ${params.page} — retry ${attempt} in ${delay}ms`);
         await sleep(delay);

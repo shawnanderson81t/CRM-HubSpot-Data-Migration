@@ -85,9 +85,14 @@ export class BatchUpserter {
     const errors = [];
 
     // Step 5 — Batch update (contacts that exist in HubSpot)
+    // Strip engager_contact_id from updates — writing it can conflict when PROD has
+    // duplicate contacts where the GHL ID is already set on a different record.
     if (updates.length > 0) {
       const res = await this.hs.batchUpdateContacts(
-        updates.map(u => ({ hubspotId: u.hubspotId, properties: u.properties }))
+        updates.map(u => {
+          const { engager_contact_id, ...safeProps } = u.properties;
+          return { hubspotId: u.hubspotId, properties: safeProps };
+        })
       );
       succeeded += res.succeeded;
       failed    += res.failed;

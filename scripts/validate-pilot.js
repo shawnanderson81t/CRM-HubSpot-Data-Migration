@@ -39,6 +39,16 @@ const PROPS_TO_FETCH = [
   'products_purchased', 'sms_engmt_score', 'email_engmt_score',
   'number_of_coaching_sessions_purchased', 'coaching_sessions_fulfilled',
   'payment_transaction_id',
+  // Event attendance status (James/Jai fulfillment fields)
+  'workshop_attendance_status', 'foundations_attendance_status', 'auction_attendance_status',
+  'commercial_attendance_status', 'expo_attendance_status', 'summit_attendance_status',
+  'symposium_attendance_status',
+  // Event date fulfilled
+  'workshop_date_fulfilled', 'foundations_date_fulfilled', 'expo_bootcamp_date_fulfilled',
+  'auction_date_fulfilled', 'commercial_bootcamp_date_fulfilled', 'flyout_date_fulfilled',
+  'summit_date_fulfilled', 'propstream_date_fulfilled',
+  // Events attended multi-select
+  'tlc_events_attended',
 ];
 
 // Numeric fields — HubSpot returns them as strings; compare as numbers

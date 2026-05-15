@@ -56,6 +56,28 @@ const CUSTOM_FIELD_ID_MAP = {
   bmw20X9pY8b8FKwEu3ur: { hubspot: 'workshop_team',   transform: 'multiSelect' },
   sPkhkhdYIas4n3iTuNql: { hubspot: 'preview_sales_rep', transform: 'multiSelect' },
   XH1v6DpEIkJiC2VEvlDb: { hubspot: 'telesales_repteam', transform: 'multiSelect' },
+
+  // --- Event attendance status (James/Jai request — May 15) ---
+  Rq7cnsHuFoM5ToszZoMN: { hubspot: 'workshop_attendance_status',    transform: null },
+  AslBpu7YJRTEWxGG5Vac: { hubspot: 'foundations_attendance_status', transform: null },
+  '8C4y1RyeYLG3fpywBSfP': { hubspot: 'auction_attendance_status',     transform: null },
+  '27987mgyDDic9Bs6KZEI': { hubspot: 'commercial_attendance_status',  transform: null },
+  m5BMgHBqYfwBvs77U31A: { hubspot: 'expo_attendance_status',         transform: null },
+  O1g8LKalb7jsHSPb5Oyo: { hubspot: 'summit_attendance_status',       transform: null },
+  R9yZyQMKm8bZKMvqAXrB: { hubspot: 'symposium_attendance_status',    transform: null },
+
+  // --- Event date fulfilled (James/Jai request — May 15) ---
+  fDwc1oHV1sQu0mKQoQOJ: { hubspot: 'workshop_date_fulfilled',          transform: 'isoDate' },
+  tIjqcLNkPtmYw7JEeQYE: { hubspot: 'foundations_date_fulfilled',       transform: 'isoDate' },
+  O2oSJOjyWViP5lPQaXSa: { hubspot: 'expo_bootcamp_date_fulfilled',     transform: 'isoDate' },
+  S1HYJJQkGdiWQoeGM6bN: { hubspot: 'auction_date_fulfilled',           transform: 'isoDate' },
+  UpGbVgWeCs8sxpNp4oNF: { hubspot: 'commercial_bootcamp_date_fulfilled', transform: 'isoDate' },
+  '45sELBoFlhUH7h7onvh9': { hubspot: 'flyout_date_fulfilled',            transform: 'isoDate' },
+  '0Sdv3wgHiYzgqeALpW8a': { hubspot: 'summit_date_fulfilled',            transform: 'isoDate' },
+  '6BYevZMMUOPFRvNuzFfE': { hubspot: 'propstream_date_fulfilled',        transform: 'isoDate' },
+
+  // --- Events attended multi-select ---
+  '8HRVUMTBzK0jS9XBJGxV': { hubspot: 'tlc_events_attended',            transform: 'multiSelect' },
 };
 
 /**

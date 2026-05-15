@@ -57,18 +57,21 @@ export class BatchUpserter {
       return { contact, properties, hubspotContactId, guestGroupRef };
     });
 
-    // Step 3 — Fetch existing HS contacts for dedup (3 lookup strategies in parallel)
-    const emails     = [...new Set(mapped.map(r => r.contact.email).filter(Boolean))];
-    const phones     = [...new Set(mapped.map(r => r.contact.phone).filter(Boolean))];
-    const engagerIds = [...new Set(mapped.map(r => r.hubspotContactId).filter(Boolean))];
+    // Step 3 — Fetch existing HS contacts for dedup (4 lookup strategies in parallel)
+    const DEDUP_PROPS = ['email', 'phone', 'engager_contact_id'];
+    const emails      = [...new Set(mapped.map(r => r.contact.email).filter(Boolean))];
+    const phones      = [...new Set(mapped.map(r => r.contact.phone).filter(Boolean))];
+    const hsIds       = [...new Set(mapped.map(r => r.hubspotContactId).filter(Boolean))];
+    const ghlIds      = [...new Set(mapped.map(r => r.contact.id).filter(Boolean))];
 
-    const [byEmail, byPhone, byEngagerId] = await Promise.all([
-      this.hs.batchReadContacts(emails,     'email',               ['email', 'phone', 'engager_contact_id']),
-      this.hs.batchReadContacts(phones,     'phone',               ['email', 'phone', 'engager_contact_id']),
-      this.hs.batchReadContacts(engagerIds, 'engager_contact_id',  ['email', 'phone', 'engager_contact_id']),
+    const [byEmail, byPhone, byHsId, byEngagerId] = await Promise.all([
+      this.hs.batchReadContacts(emails,  'email',               DEDUP_PROPS),
+      this.hs.batchReadContacts(phones,  'phone',               DEDUP_PROPS),
+      this.hs.batchReadContacts(hsIds,   'hs_object_id',        DEDUP_PROPS),
+      this.hs.batchReadContacts(ghlIds,  'engager_contact_id',  DEDUP_PROPS),
     ]);
 
-    const existingMap = buildExistingMap([...byEmail, ...byPhone, ...byEngagerId]);
+    const existingMap = buildExistingMap([...byEmail, ...byPhone, ...byHsId, ...byEngagerId]);
 
     // Step 4 — Deduplicate
     const { updates, inserts, unresolvable } = deduplicateBatch(mapped, existingMap);

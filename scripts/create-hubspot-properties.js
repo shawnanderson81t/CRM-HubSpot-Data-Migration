@@ -520,6 +520,13 @@ const PROPERTIES_TO_CREATE = [
   },
 ];
 
+/** Cities in our geoResolver missing from Andy's eventtag property options */
+const EVENTTAG_NEW_OPTIONS = [
+  { label: 'West Palm Beach', value: 'West Palm Beach', displayOrder: 999, hidden: false },
+  { label: 'New York',        value: 'New York',        displayOrder: 999, hidden: false },
+  { label: 'Manhasset',       value: 'Manhasset',       displayOrder: 999, hidden: false },
+];
+
 /** Options to add to the existing event_type property (4 confirmed missing) */
 const EVENT_TYPE_NEW_OPTIONS = [
   { label: 'Foundations', value: 'Foundations', displayOrder: 3, hidden: false },
@@ -634,6 +641,19 @@ async function run() {
     const msg = err.response?.data?.message || err.message;
     console.error(`  FAIL  event_type — ${msg}`);
     report.eventTypeUpdate = { status: 'failed', error: msg };
+  }
+
+  console.log('\n  Updating eventtag options...');
+  try {
+    const result = await addOptionsToProperty('eventtag', EVENTTAG_NEW_OPTIONS);
+    if (result.skipped) {
+      console.log(`  SKIP  eventtag options  (${result.reason})`);
+    } else {
+      console.log(`  OK    eventtag — added: ${result.added.join(', ')}`);
+    }
+  } catch (err) {
+    const msg = err.response?.data?.message || err.message;
+    console.error(`  FAIL  eventtag — ${msg}`);
   }
 
   // Save report

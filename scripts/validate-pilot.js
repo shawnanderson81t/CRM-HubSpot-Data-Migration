@@ -11,15 +11,26 @@ import { logger } from '../src/utils/logger.js';
  * and comparing actual values against what fieldMapper expected to write.
  *
  * Usage:
- *   node scripts/validate-pilot.js             # validates first 20 contacts
- *   node scripts/validate-pilot.js --count=50
+ *   node scripts/validate-pilot.js                        # Tier 1, 20 contacts
+ *   node scripts/validate-pilot.js --tier=2 --count=10   # Tier 2, 10 contacts
+ *   node scripts/validate-pilot.js --tier=3 --count=10   # Tier 3, 10 contacts
  *
  * Output: data/reports/validate-pilot-[timestamp].json
  */
 
+const TIER = parseInt(
+  process.argv.find(a => a.startsWith('--tier='))?.split('=')[1] || '1'
+);
+
 const COUNT = parseInt(
   process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '20'
 );
+
+const TIER_DATA_FILE = {
+  1: './data/samples/workshop-buyers-sample.json',
+  2: './data/samples/preview-buyers.json',
+  3: './data/samples/registrants-sample.json',
+};
 
 // Properties to fetch back from HubSpot for comparison
 const PROPS_TO_FETCH = [
@@ -124,11 +135,17 @@ async function main() {
   const config = loadConfig();
   const hsClient = new HubSpotClient(config);
 
+  const dataFile = TIER_DATA_FILE[TIER];
+  if (!dataFile) {
+    logger.error(`Invalid tier: ${TIER}. Use --tier=1, --tier=2, or --tier=3`);
+    process.exit(1);
+  }
+
   let allContacts;
   try {
-    allContacts = JSON.parse(readFileSync('./data/samples/workshop-buyers-sample.json', 'utf-8'));
+    allContacts = JSON.parse(readFileSync(dataFile, 'utf-8'));
   } catch {
-    logger.error('Cannot read workshop-buyers-sample.json — run extract:wb first');
+    logger.error(`Cannot read ${dataFile} — run the extract script first`);
     process.exit(1);
   }
 

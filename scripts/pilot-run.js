@@ -10,33 +10,44 @@ import { logger } from '../src/utils/logger.js';
  * Pilot run — validate the full pipeline against a small sample before any bulk migration.
  *
  * Usage:
- *   node scripts/pilot-run.js             # 100 contacts (default)
- *   node scripts/pilot-run.js --count=50  # 50 contacts
+ *   node scripts/pilot-run.js                        # Tier 1, 10 contacts
+ *   node scripts/pilot-run.js --tier=2 --count=10    # Tier 2, 10 contacts
+ *   node scripts/pilot-run.js --tier=3 --count=10    # Tier 3, 10 contacts
  *
- * Reads from data/samples/workshop-buyers-sample.json.
- * Make sure HUBSPOT_API_KEY points to the SANDBOX portal — not PROD.
- *
- * After running, manually verify in HubSpot:
- *   - Existing contacts were updated (not duplicated)
- *   - No existing field values were overwritten with blanks
- *   - buyer_tier, eventtag, market_name, payment fields are populated
- *   - Contact owner is assigned where ownerMap has a match
+ * Make sure HUBSPOT_API_KEY points to the correct portal before running.
  */
 
-const COUNT = parseInt(
-  process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '100'
+const TIER = parseInt(
+  process.argv.find(a => a.startsWith('--tier='))?.split('=')[1] || '1'
 );
+
+const COUNT = parseInt(
+  process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '10'
+);
+
+const TIER_CONFIG = {
+  1: { name: 'Workshop Buyers',     dataFile: './data/samples/workshop-buyers-sample.json' },
+  2: { name: 'Preview Buyers',      dataFile: './data/samples/preview-buyers.json' },
+  3: { name: 'General Registrants', dataFile: './data/samples/registrants-sample.json' },
+};
 
 async function main() {
   const config = loadConfig();
-  logger.info(`=== Pilot Run: ${COUNT} contacts ===`);
+  const tierInfo = TIER_CONFIG[TIER];
+
+  if (!tierInfo) {
+    logger.error(`Invalid tier: ${TIER}. Use --tier=1, --tier=2, or --tier=3`);
+    process.exit(1);
+  }
+
+  logger.info(`=== Pilot Run: Tier ${TIER} (${tierInfo.name}) — ${COUNT} contacts ===`);
   logger.info(`Target HubSpot portal base: ${config.hubspot.baseUrl}`);
 
   let allContacts;
   try {
-    allContacts = JSON.parse(readFileSync('./data/samples/workshop-buyers-sample.json', 'utf-8'));
+    allContacts = JSON.parse(readFileSync(tierInfo.dataFile, 'utf-8'));
   } catch (err) {
-    logger.error('Cannot read workshop-buyers-sample.json', { error: err.message });
+    logger.error(`Cannot read ${tierInfo.dataFile} — run the extract script first`, { error: err.message });
     process.exit(1);
   }
 
@@ -52,12 +63,12 @@ async function main() {
   }
 
   const hubspotClient = new HubSpotClient(config);
-  const checkpoint    = new Checkpoint('pilot', config.paths.checkpointDir);
+  const checkpoint    = new Checkpoint(`pilot-tier${TIER}`, config.paths.checkpointDir);
   const upserter      = new BatchUpserter(hubspotClient, checkpoint, config, ownerMap);
 
-  const state = await upserter.run(contacts, 'pilot');
+  const state = await upserter.run(contacts, `tier${TIER}-pilot`);
 
-  logger.info('=== Pilot Complete ===', {
+  logger.info(`=== Tier ${TIER} Pilot Complete ===`, {
     total:     contacts.length,
     succeeded: state.succeeded,
     failed:    state.failed,
@@ -65,10 +76,10 @@ async function main() {
   });
 
   if (state.failed > 0) {
-    logger.warn(`${state.failed} contacts failed. Check data/checkpoints/pilot-checkpoint.json`);
+    logger.warn(`${state.failed} contacts failed. Check data/checkpoints/pilot-tier${TIER}-checkpoint.json`);
   }
 
-  logger.info('Next step: spot-check 10-20 contacts in HubSpot sandbox before approving Tier 1 run.');
+  logger.info(`Next step: validate with "npm run validate:pilot -- --tier=${TIER} --count=${COUNT}"`);
 }
 
 main().catch(err => {

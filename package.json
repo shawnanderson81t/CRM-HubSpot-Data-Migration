@@ -16,6 +16,8 @@
     "extract:sample": "node scripts/extract-sample.js",
     "extract:wb": "node scripts/extract-workshop-buyers.js",
     "extract:pb": "node scripts/extract-preview-buyers.js",
+    "extract:reg": "node scripts/extract-registrants.js",
+    "extract:reg:sample": "node scripts/extract-registrants.js --count=100",
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",
     "create-properties": "node scripts/create-hubspot-properties.js",

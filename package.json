@@ -15,6 +15,7 @@
     "sample:ghl-endpoints": "node scripts/sample-ghl-endpoints.js",
     "extract:sample": "node scripts/extract-sample.js",
     "extract:wb": "node scripts/extract-workshop-buyers.js",
+    "extract:pb": "node scripts/extract-preview-buyers.js",
     "pilot": "node scripts/pilot-run.js",
     "validate": "node src/validation/index.js",
     "create-properties": "node scripts/create-hubspot-properties.js",

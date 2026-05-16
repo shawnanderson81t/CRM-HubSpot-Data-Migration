@@ -16,10 +16,12 @@ async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 2000 } = {}) {
       return await fn();
     } catch (err) {
       const status = err.response?.status;
-      if (status === 429 && attempt < maxAttempts) {
+      // Retry on 429 (rate limit) or SSL/network errors (no HTTP status — transient on remote)
+      const isRetryable = status === 429 || !status;
+      if (isRetryable && attempt < maxAttempts) {
         const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '0', 10);
         const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelayMs * attempt;
-        logger.warn(`GHL 429 rate limit — retry ${attempt}/${maxAttempts - 1} in ${delay}ms`);
+        logger.warn(`GHL ${status ?? 'SSL/network'} error — retry ${attempt}/${maxAttempts - 1} in ${delay}ms`);
         await sleep(delay);
         continue;
       }

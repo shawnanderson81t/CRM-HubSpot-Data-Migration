@@ -27,7 +27,7 @@ import { logger } from '../src/utils/logger.js';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function fetchOppsPage(client, params, retries = 5) {
+async function fetchOppsPage(client, params, retries = 6) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await client.get('/opportunities/search', { params });
@@ -37,9 +37,11 @@ async function fetchOppsPage(client, params, retries = 5) {
         // GHL returns 400 (not an empty array) when page is past the end of results
         return { data: { opportunities: [] } };
       }
-      if (status === 429 && attempt < retries) {
+      // Retry on 429 (rate limit) or network/SSL errors (no HTTP status — transient on remote)
+      const isRetryable = status === 429 || !status;
+      if (isRetryable && attempt < retries) {
         const delay = 2000 * attempt;
-        logger.warn(`GHL 429 on opps page ${params.page} — retry ${attempt} in ${delay}ms`);
+        logger.warn(`GHL ${status ?? 'SSL/network'} error on opps page ${params.page} [${params.status}] — retry ${attempt}/${retries - 1} in ${delay}ms`);
         await sleep(delay);
         continue;
       }

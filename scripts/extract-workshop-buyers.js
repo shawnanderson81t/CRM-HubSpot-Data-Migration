@@ -55,10 +55,12 @@ const SAMPLES_DIR = join(__dirname, '../data/samples');
 const REPORTS_DIR = join(__dirname, '../data/reports');
 
 const WORKSHOP_PIPELINE_ID = 'sJF6NWKqQAF4qZGBK3cq';
-const BUYER_TAGS = new Set(['wb', 'wb_diamond']);
+
+// All opportunity statuses — GHL defaults to 'open' only, missing won/lost/abandoned
+const OPP_STATUSES = ['open', 'won', 'lost', 'abandoned'];
 
 const TARGET_COUNT = parseInt(
-  process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '100'
+  process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '50000'
 );
 
 async function run() {
@@ -66,66 +68,70 @@ async function run() {
   const ghl = new GHLClient(config.ghl);
   const client = ghl._getClient();
 
-  logger.info(`extract-workshop-buyers: targeting ${TARGET_COUNT} WBs (wb/wb_diamond) via pipeline`);
-  console.log(`\n=== GHL Extract — Workshop Buyers via Pipeline (filtered) ===`);
+  logger.info(`extract-workshop-buyers: targeting up to ${TARGET_COUNT} contacts via pipeline (all statuses, no tag filter)`);
+  console.log(`\n=== GHL Extract — Workshop Buyers via Pipeline (all statuses) ===`);
   console.log(`  Pipeline : ${WORKSHOP_PIPELINE_ID} (2 - Workshops)`);
-  console.log(`  Tags     : wb, wb_diamond`);
-  console.log(`  Target   : ${TARGET_COUNT} contacts\n`);
+  console.log(`  Statuses : ${OPP_STATUSES.join(', ')}`);
+  console.log(`  Filter   : none (all pipeline contacts per Andy's instruction)`);
+  console.log(`  Target   : up to ${TARGET_COUNT} contacts\n`);
 
   const startTime = Date.now();
 
   const matched = [];
-  const seenIds = new Set();
-  let page = 1;
+  const seenIds = new Set();   // deduplicates contacts across all statuses
   let oppScanned = 0;
   let contactsFetched = 0;
   let fetchErrors = 0;
 
-  while (matched.length < TARGET_COUNT) {
-    // Opportunities API uses page-number pagination (not startAfterId like contacts)
-    const params = {
-      location_id: config.ghl.locationId,
-      pipeline_id: WORKSHOP_PIPELINE_ID,
-      limit: 100,
-      page,
-    };
+  // Paginate through every opportunity status — GHL caps each status at 10K results
+  for (const status of OPP_STATUSES) {
+    if (matched.length >= TARGET_COUNT) break;
+    console.log(`\n  [status: ${status}]`);
+    let page = 1;
 
-    const response = await fetchOppsPage(client, params);
+    while (matched.length < TARGET_COUNT) {
+      const params = {
+        location_id: config.ghl.locationId,
+        pipeline_id: WORKSHOP_PIPELINE_ID,
+        status,
+        limit: 100,
+        page,
+      };
 
-    const opportunities = response.data?.opportunities ?? [];
-    oppScanned += opportunities.length;
+      const response = await fetchOppsPage(client, params);
+      const opportunities = response.data?.opportunities ?? [];
+      oppScanned += opportunities.length;
 
-    if (opportunities.length === 0) break;
+      if (opportunities.length === 0) break;
 
-    // Unique contact IDs not yet processed
-    const ids = opportunities
-      .map(o => o.contactId)
-      .filter(id => id && !seenIds.has(id));
-    ids.forEach(id => seenIds.add(id));
+      // Unique contact IDs not yet seen across any status
+      const ids = opportunities
+        .map(o => o.contactId)
+        .filter(id => id && !seenIds.has(id));
+      ids.forEach(id => seenIds.add(id));
 
-    for (const id of ids) {
-      if (matched.length >= TARGET_COUNT) break;
-      try {
-        const contact = await ghl.getContact(id);
-        contactsFetched++;
-        if (contact && (contact.tags ?? []).some(t => BUYER_TAGS.has(t))) {
+      for (const id of ids) {
+        if (matched.length >= TARGET_COUNT) break;
+        try {
+          const contact = await ghl.getContact(id);
+          contactsFetched++;
           matched.push(contact);
+        } catch (err) {
+          logger.warn(`skip contact ${id}: ${err.message}`);
+          fetchErrors++;
         }
-      } catch (err) {
-        logger.warn(`skip contact ${id}: ${err.message}`);
-        fetchErrors++;
+
+        process.stdout.write(
+          `\r  Opps scanned: ${oppScanned} | Fetched: ${contactsFetched} | Collected: ${matched.length} | Page: ${page} [${status}]  `
+        );
+        await sleep(150);
       }
 
-      process.stdout.write(
-        `\r  Opps scanned: ${oppScanned} | Fetched: ${contactsFetched} | Matched: ${matched.length}/${TARGET_COUNT} | Page: ${page}  `
-      );
-      await sleep(150); // stay under GHL's ~10 req/s rate limit
+      logger.info(`extract-wb [${status}] page ${page}: opps=${oppScanned}, fetched=${contactsFetched}, collected=${matched.length}`);
+
+      if (opportunities.length < 100) break;
+      page++;
     }
-
-    logger.info(`extract-wb page ${page}: opps=${oppScanned}, fetched=${contactsFetched}, matched=${matched.length}`);
-
-    if (opportunities.length < 100) break;
-    page++;
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -177,14 +183,14 @@ async function run() {
   const sample = matched.slice(0, 5).map(c => ({
     id: c.id,
     name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
-    tags: (c.tags ?? []).filter(t => BUYER_TAGS.has(t)),
+    tags: (c.tags ?? []).slice(0, 5),
   }));
 
   const report = {
     timestamp: new Date().toISOString(),
-    strategy: 'pipeline-opportunities-filtered',
+    strategy: 'pipeline-opportunities-all-statuses',
     pipelineId: WORKSHOP_PIPELINE_ID,
-    buyerTags: [...BUYER_TAGS],
+    statuses: OPP_STATUSES,
     config: { targetCount: TARGET_COUNT },
     results: {
       opportunitiesScanned: oppScanned,
@@ -215,7 +221,7 @@ async function run() {
   console.log(`=== Summary ===`);
   console.log(`  Opportunities scanned : ${oppScanned}`);
   console.log(`  Contacts fetched      : ${contactsFetched}`);
-  console.log(`  Workshop Buyers found : ${matched.length} (wb/wb_diamond)`);
+  console.log(`  Contacts collected    : ${matched.length} (all pipeline contacts, no tag filter)`);
   console.log(`  Fetch errors          : ${fetchErrors}`);
   console.log(`  Elapsed               : ${elapsed}s`);
   console.log(`\n  Contacts : data/samples/workshop-buyers-sample.json`);

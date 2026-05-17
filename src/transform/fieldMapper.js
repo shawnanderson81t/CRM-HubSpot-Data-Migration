@@ -188,6 +188,12 @@ export function mapContact(contact) {
     }
   }
 
+  // Normalize known dirty market_name aliases (e.g. "San Fran" → "San Francisco")
+  if (properties.market_name) {
+    const alias = MARKET_NAME_ALIASES[properties.market_name.toLowerCase().trim()];
+    if (alias) properties.market_name = alias;
+  }
+
   // --- Tags → derived properties ---
   const tags = contact.tags ?? [];
   const tagSet = new Set(tags);
@@ -258,15 +264,24 @@ function applyTransform(transformName, value) {
   }
 }
 
+/** Known dirty GHL market_name values → correct HubSpot enum option */
+const MARKET_NAME_ALIASES = {
+  'san fran': 'San Francisco',
+  'sf':       'San Francisco',
+};
+
 /**
  * Convert IANA timezone string to HubSpot hs_timezone format.
  * HubSpot expects lowercase with "/" replaced by "_slash_".
  * e.g. "America/Denver" → "america_slash_denver"
+ * Returns null for values that are not IANA timezone format (e.g. "prince").
  * @param {string|null|undefined} tz
  * @returns {string|null}
  */
 function toHubspotTimezone(tz) {
   if (!tz) return null;
+  // Valid IANA timezones contain '/' (America/Denver) or are well-known abbreviations
+  if (!tz.includes('/') && !/^(UTC|GMT)$/i.test(tz)) return null;
   return tz.toLowerCase().replace(/\//g, '_slash_');
 }
 

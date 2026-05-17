@@ -116,6 +116,30 @@ export class HubSpotClient {
   }
 
   /**
+   * PATCH an existing contact with safe properties (no email/phone/GHL ID).
+   * Shared by 409 and uniqueness-conflict fallback paths.
+   *
+   * @param {string} hsId - HubSpot contact ID to PATCH
+   * @param {Object} properties - Full properties object (dedup keys will be stripped)
+   * @param {Array} errors - Error accumulator (pushed to on failure, not on success)
+   */
+  async _patchExisting(hsId, properties, errors) {
+    const { engager_contact_id, email, phone, ...safeProps } = properties;
+    try {
+      await this._withRetry(() =>
+        this.client.patch(`/crm/v3/objects/contacts/${hsId}`, { properties: safeProps })
+      );
+      return true;
+    } catch (patchErr) {
+      errors.push({
+        email: properties.email,
+        reason: `patch HS ${hsId} failed: ${patchErr.response?.data?.message || patchErr.message}`,
+      });
+      return false;
+    }
+  }
+
+  /**
    * Per-record fallback for INVALID_OPTION batch failures.
    * Strips the offending enum fields and PATCHes each contact individually.
    *
@@ -165,10 +189,11 @@ export class HubSpotClient {
       );
       return { succeeded: (data.results || []).length, failed: 0, errors: [] };
     } catch (err) {
-      if (err.response?.status === 409) {
-        // At least one contact in the batch already exists — fall back to individual
-        // creates so we can parse the existing HS ID on each 409 and PATCH instead.
-        logger.warn(`batchCreateContacts 409 — falling back to one-by-one (${records.length} records)`);
+      const status = err.response?.status;
+      if (status === 409 || status === 400) {
+        // 409 = contact already exists; 400 = invalid field value (e.g. INVALID_EMAIL on
+        // one contact fails the whole batch). Fall back to per-record to isolate failures.
+        logger.warn(`batchCreateContacts ${status} — falling back to one-by-one (${records.length} records)`);
         return this._createWithFallback(records);
       }
       logger.error('batchCreateContacts failed', {
@@ -210,37 +235,50 @@ export class HubSpotClient {
         );
         succeeded++;
       } catch (err) {
-        if (err.response?.status === 409) {
-          const msg = err.response?.data?.message || '';
+        const status = err.response?.status;
+        const msg = err.response?.data?.message || '';
+
+        if (status === 409) {
+          // Contact exists — parse HS ID from "Existing ID: XXXXXXXXX" and PATCH
           const match = msg.match(/Existing ID[:\s]+(\d+)/i);
           if (match) {
-            const hsId = match[1];
-            const { engager_contact_id, email, phone, ...safeProps } = record.properties;
-            try {
-              await this._withRetry(() =>
-                this.client.patch(`/crm/v3/objects/contacts/${hsId}`, { properties: safeProps })
-              );
-              succeeded++;
-            } catch (patchErr) {
-              failed++;
-              errors.push({
-                email: record.properties.email,
-                reason: `409 patch fallback failed for HS ${hsId}: ${patchErr.response?.data?.message || patchErr.message}`,
-              });
-            }
+            if (await this._patchExisting(match[1], record.properties, errors)) succeeded++;
+            else failed++;
           } else {
             failed++;
-            errors.push({
-              email: record.properties.email,
-              reason: `409 contact exists but could not parse HS ID: ${msg}`,
-            });
+            errors.push({ email: record.properties.email, reason: `409 — could not parse HS ID: ${msg}` });
+          }
+        } else if (status === 400) {
+          // "X already has that value" — uniqueness conflict on engager_contact_id or similar
+          const uniqueMatch = msg.match(/(\d+) already has that value/);
+          if (uniqueMatch) {
+            if (await this._patchExisting(uniqueMatch[1], record.properties, errors)) succeeded++;
+            else failed++;
+          } else {
+            // INVALID_OPTION — strip the bad fields and retry create
+            const invalidFields = parseInvalidOptionFields(err.response?.data);
+            if (invalidFields.size > 0) {
+              const props = Object.fromEntries(
+                Object.entries(record.properties).filter(([k]) => !invalidFields.has(k))
+              );
+              try {
+                await this._withRetry(() =>
+                  this.client.post('/crm/v3/objects/contacts', { properties: props })
+                );
+                succeeded++;
+              } catch (retryErr) {
+                failed++;
+                errors.push({ email: record.properties.email, reason: retryErr.response?.data?.message || retryErr.message });
+              }
+            } else {
+              // INVALID_EMAIL or other unrecoverable 400 — skip this contact
+              failed++;
+              errors.push({ email: record.properties.email, reason: msg || err.message });
+            }
           }
         } else {
           failed++;
-          errors.push({
-            email: record.properties.email,
-            reason: err.response?.data?.message || err.message,
-          });
+          errors.push({ email: record.properties.email, reason: err.response?.data?.message || err.message });
         }
       }
     }

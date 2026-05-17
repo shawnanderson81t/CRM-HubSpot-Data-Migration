@@ -78,9 +78,6 @@ const SKIP_ON_UPDATE = new Set([
 // Fields where a mismatch is a WARNING (not a hard FAIL) — e.g. optional enrichment
 const WARN_ONLY_FIELDS = new Set([
   'utm_source', 'utm_medium', 'cancellation_status',
-  // PROD has custom lifecycle stage IDs (e.g. 2107021006) — overwriting with "customer"
-  // needs explicit sign-off; treat as warn until confirmed with Andy's team.
-  'lifecyclestage',
 ]);
 
 /**

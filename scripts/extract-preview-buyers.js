@@ -262,14 +262,20 @@ async function run() {
     pipelineId: PREVIEW_PIPELINE_ID,
     statuses: OPP_STATUSES,
     config: { targetCount: TARGET_COUNT },
-    results: { opportunitiesScanned: oppScanned, contactsFetched, contactsCollected: contacts.length, fetchErrors, elapsedSeconds: parseFloat(elapsed) },
+    results: { opportunitiesScanned: oppScanned, contactsFetched, contactsCollected: unique.length, duplicatesRemoved: contacts.length - unique.length, fetchErrors, elapsedSeconds: parseFloat(elapsed) },
     sample,
     fieldCoverage: coveragePct,
     topTags,
   };
 
+  const unique = [...new Map(contacts.map(c => [c.id, c])).values()];
+  if (unique.length !== contacts.length) {
+    logger.warn(`Dedup: removed ${contacts.length - unique.length} duplicate contacts before writing`);
+    console.log(`  ⚠ Removed ${contacts.length - unique.length} duplicates (GHL pagination overlap)`);
+  }
+
   mkdirSync(SAMPLES_DIR, { recursive: true });
-  writeFileSync(join(SAMPLES_DIR, 'preview-buyers.json'), JSON.stringify(contacts, null, 2));
+  writeFileSync(join(SAMPLES_DIR, 'preview-buyers.json'), JSON.stringify(unique, null, 2));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
   const timestamp  = new Date().toISOString().replace(/[:.]/g, '-');
@@ -281,7 +287,7 @@ async function run() {
   console.log(`=== Summary ===`);
   console.log(`  Opportunities scanned : ${oppScanned}`);
   console.log(`  Contacts fetched      : ${contactsFetched}`);
-  console.log(`  Contacts collected    : ${contacts.length}`);
+  console.log(`  Contacts collected    : ${unique.length} (${contacts.length - unique.length} duplicates removed)`);
   console.log(`  Fetch errors          : ${fetchErrors}`);
   console.log(`  Elapsed               : ${elapsed}s`);
   console.log(`\n  Contacts : data/samples/preview-buyers.json`);

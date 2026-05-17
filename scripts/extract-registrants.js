@@ -224,13 +224,19 @@ async function main() {
     timestamp: new Date().toISOString(),
     strategy: 'contacts-api-cursor-pagination',
     config: { targetCount: TARGET_COUNT },
-    results: { pagesScanned: page, contactsScanned: scanned, syncContactsSkipped: skipped, contactsCollected: collected.length, elapsedSeconds: parseFloat(elapsed) },
+    results: { pagesScanned: page, contactsScanned: scanned, syncContactsSkipped: skipped, contactsCollected: unique.length, duplicatesRemoved: collected.length - unique.length, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
   };
 
+  const unique = [...new Map(collected.map(c => [c.id, c])).values()];
+  if (unique.length !== collected.length) {
+    logger.warn(`Dedup: removed ${collected.length - unique.length} duplicate contacts before writing`);
+    console.log(`  ⚠ Removed ${collected.length - unique.length} duplicates (cursor pagination overlap)`);
+  }
+
   mkdirSync(SAMPLES_DIR, { recursive: true });
-  writeFileSync(join(SAMPLES_DIR, outputFile), JSON.stringify(collected, null, 2));
+  writeFileSync(join(SAMPLES_DIR, outputFile), JSON.stringify(unique, null, 2));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
   const timestamp  = new Date().toISOString().replace(/[:.]/g, '-');
@@ -243,7 +249,7 @@ async function main() {
   console.log(`  Pages scanned          : ${page}`);
   console.log(`  Contacts scanned       : ${scanned}`);
   console.log(`  Sync contacts skipped  : ${skipped}`);
-  console.log(`  Contacts collected     : ${collected.length}`);
+  console.log(`  Contacts collected     : ${unique.length} (${collected.length - unique.length} duplicates removed)`);
   console.log(`  Elapsed                : ${elapsed}s`);
   console.log(`\n  Output : data/samples/${outputFile}`);
   console.log(`  Report : data/reports/extract-reg-${timestamp}.json`);

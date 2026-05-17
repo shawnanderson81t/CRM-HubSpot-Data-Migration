@@ -5,6 +5,28 @@ const MAX_RETRIES = 5;
 const INITIAL_BACKOFF_MS = 1000;
 
 /**
+ * Parse INVALID_OPTION field names from a HubSpot 400 error response.
+ * HubSpot embeds validation errors as a JSON array inside the message string.
+ *
+ * @param {Object} responseData - err.response.data
+ * @returns {Set<string>} field names that had invalid enum values
+ */
+function parseInvalidOptionFields(responseData) {
+  const invalidFields = new Set();
+  const msg = responseData?.message || '';
+  const match = msg.match(/\[[\s\S]*\]/);
+  if (match) {
+    try {
+      const errors = JSON.parse(match[0]);
+      for (const e of errors) {
+        if (e.error === 'INVALID_OPTION' && e.name) invalidFields.add(e.name);
+      }
+    } catch { /* ignore parse errors */ }
+  }
+  return invalidFields;
+}
+
+/**
  * HubSpot CRM API v3 client.
  *
  * All mutating methods (batchUpdateContacts, batchCreateContacts) use
@@ -68,6 +90,15 @@ export class HubSpotClient {
       );
       return { succeeded: (data.results || []).length, failed: 0, errors: [] };
     } catch (err) {
+      if (err.response?.status === 400) {
+        const invalidFields = parseInvalidOptionFields(err.response?.data);
+        if (invalidFields.size > 0) {
+          logger.warn(
+            `batchUpdateContacts 400 INVALID_OPTION [${[...invalidFields].join(', ')}] — retrying ${records.length} records per-contact with those fields stripped`
+          );
+          return this._updateStrippingFields(records, invalidFields);
+        }
+      }
       logger.error('batchUpdateContacts failed', {
         status: err.response?.status,
         detail: err.response?.data?.message,
@@ -82,6 +113,40 @@ export class HubSpotClient {
         })),
       };
     }
+  }
+
+  /**
+   * Per-record fallback for INVALID_OPTION batch failures.
+   * Strips the offending enum fields and PATCHes each contact individually.
+   *
+   * @param {Array<{ hubspotId: string, properties: Object }>} records
+   * @param {Set<string>} stripFields - field names to remove before retrying
+   * @returns {Promise<{ succeeded: number, failed: number, errors: Array }>}
+   */
+  async _updateStrippingFields(records, stripFields) {
+    let succeeded = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (const record of records) {
+      const props = Object.fromEntries(
+        Object.entries(record.properties).filter(([k]) => !stripFields.has(k))
+      );
+      try {
+        await this._withRetry(() =>
+          this.client.patch(`/crm/v3/objects/contacts/${record.hubspotId}`, { properties: props })
+        );
+        succeeded++;
+      } catch (patchErr) {
+        failed++;
+        errors.push({
+          hubspotId: record.hubspotId,
+          reason: patchErr.response?.data?.message || patchErr.message,
+        });
+      }
+    }
+
+    return { succeeded, failed, errors };
   }
 
   /**

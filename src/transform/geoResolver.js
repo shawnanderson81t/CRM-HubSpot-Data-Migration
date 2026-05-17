@@ -76,6 +76,8 @@ const CITY_CODE_MAP = {
   okc: 'Oklahoma City',
   lit: 'Little Rock',
   las: 'Las Vegas',
+  bna: 'Nashville',
+  chall: 'Chattanooga',
 };
 
 /**

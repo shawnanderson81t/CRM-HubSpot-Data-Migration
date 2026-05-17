@@ -69,6 +69,13 @@ const CITY_CODE_MAP = {
   ken: 'Kennewick',
   gsb: 'Greensboro',
   bmh: 'Birmingham',
+  har: 'Hartford',
+  gsp: 'Greenville',
+  iah: 'Houston',
+  sct: 'Scottsdale',
+  okc: 'Oklahoma City',
+  lit: 'Little Rock',
+  las: 'Las Vegas',
 };
 
 /**

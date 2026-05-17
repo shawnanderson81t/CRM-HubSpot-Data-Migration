@@ -100,6 +100,12 @@ export class HubSpotClient {
       );
       return { succeeded: (data.results || []).length, failed: 0, errors: [] };
     } catch (err) {
+      if (err.response?.status === 409) {
+        // At least one contact in the batch already exists — fall back to individual
+        // creates so we can parse the existing HS ID on each 409 and PATCH instead.
+        logger.warn(`batchCreateContacts 409 — falling back to one-by-one (${records.length} records)`);
+        return this._createWithFallback(records);
+      }
       logger.error('batchCreateContacts failed', {
         status:   err.response?.status,
         detail:   err.response?.data?.message || JSON.stringify(err.response?.data),
@@ -117,6 +123,64 @@ export class HubSpotClient {
         })),
       };
     }
+  }
+
+  /**
+   * Per-record fallback for 409 batch failures.
+   * Creates each contact individually; on 409 parses the existing HS ID from the
+   * error message and PATCHes that contact with safe properties (no email/phone/GHL ID).
+   *
+   * @param {Array<{ properties: Object }>} records
+   * @returns {Promise<{ succeeded: number, failed: number, errors: Array }>}
+   */
+  async _createWithFallback(records) {
+    let succeeded = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (const record of records) {
+      try {
+        await this._withRetry(() =>
+          this.client.post('/crm/v3/objects/contacts', { properties: record.properties })
+        );
+        succeeded++;
+      } catch (err) {
+        if (err.response?.status === 409) {
+          const msg = err.response?.data?.message || '';
+          const match = msg.match(/Existing ID[:\s]+(\d+)/i);
+          if (match) {
+            const hsId = match[1];
+            const { engager_contact_id, email, phone, ...safeProps } = record.properties;
+            try {
+              await this._withRetry(() =>
+                this.client.patch(`/crm/v3/objects/contacts/${hsId}`, { properties: safeProps })
+              );
+              succeeded++;
+            } catch (patchErr) {
+              failed++;
+              errors.push({
+                email: record.properties.email,
+                reason: `409 patch fallback failed for HS ${hsId}: ${patchErr.response?.data?.message || patchErr.message}`,
+              });
+            }
+          } else {
+            failed++;
+            errors.push({
+              email: record.properties.email,
+              reason: `409 contact exists but could not parse HS ID: ${msg}`,
+            });
+          }
+        } else {
+          failed++;
+          errors.push({
+            email: record.properties.email,
+            reason: err.response?.data?.message || err.message,
+          });
+        }
+      }
+    }
+
+    return { succeeded, failed, errors };
   }
 
   /**

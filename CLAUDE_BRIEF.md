@@ -285,8 +285,9 @@ src/
 - [x] PROD pilot: 10 contacts — 10/10 succeeded after 3 bug fixes (see below)
 - [x] PROD pilot validation — 7/10 PASS, 3 NOT_FOUND (PROD data quality, not migration issue)
 - [x] Full Workshop Buyers extraction — 1,834 contacts confirmed (see count note below)
-- [ ] PROD pilot sign-off — Andy review scheduled this weekend
-- [ ] Tier 1 full run — pending Andy sign-off (ready to execute, ~5 min run)
+- [x] PROD pilot shared with Andy for weekend review
+- [x] Andy replied: include ALL pipeline contacts (~33K), not just wb/wb_diamond. Remove tag filter, add all statuses (open/won/lost/abandoned). Re-extraction underway.
+- [ ] Tier 1 full run — pending Andy sign-off + re-extraction complete
 
 **Bugs found and fixed during PROD pilot (May 15–16):**
 1. *Dedup bug (critical)*: engager_contact_id lookup was receiving HubSpot IDs instead of GHL IDs — fixed to use hs_object_id for HS IDs and engager_contact_id for GHL IDs separately
@@ -295,13 +296,13 @@ src/
 4. *GHL 429 rate limit*: extract script was crashing on rate limit errors — added retry-with-backoff (5 attempts, exponential delay) and 150ms inter-request delay
 5. *GHL 400 end-of-page*: GHL returns HTTP 400 (not empty array) past the last page — was crashing before saving; fixed to treat 400 as end-of-results
 
-**Workshop Buyer count — confirmed May 16:**
-- Total opportunities in Workshop pipeline: 10,000 (100 pages × 100)
-- Contacts with wb/wb_diamond tags: **1,834** (not ~10K as originally estimated)
-- wb_diamond: 885 | wb only: 949
-- The ~10K estimate referred to pipeline size, not actual buyers
-- Remaining ~8,200 pipeline contacts are leads/registrants who did not convert
-- Total 850K migration scope is unchanged — 1,834 is Tier 1 only
+**Workshop Buyer count — revised May 16 (Andy reply):**
+- First run result: 1,834 contacts matched wb/wb_diamond tags (open status only)
+- Andy's reply: include ALL pipeline contacts — open + won + lost + abandoned, no tag filter
+- Revised expected Tier 1 count: **~33K** (all pipeline opportunities, all statuses)
+- Tag filter removed from extract-workshop-buyers.js; all 4 statuses added (open/won/lost/abandoned)
+- Re-extraction running on remote machine (targeting 50K cap, will capture full ~33K)
+- Total 850K migration scope is unchanged — ~33K is Tier 1 only
 
 **Pre-flight checklist — required before Tier 1 runs:**
 1. Andy sign-off (weekend review)
@@ -319,27 +320,36 @@ src/
 > **⚠️ PREVIEW DEALS — NEW SCOPE ITEM (May 15)**: Andy flagged that Preview deals were **never migrated** from Engager to HubSpot. His team won't cover it. We agreed to take it on as a **separate pass after May 22** (post contact migration). Source data is complex: mix of contact fields + tags + opportunities in Engager. Steps: (1) sample Preview opportunities to map extraction logic, (2) build extractor + deal creator, (3) run after Tier 3 contact migration completes. Does NOT affect May 22 target.
 
 ### Phase 3 — Tier 1 Migration (May 17, weekend)
+- [ ] Wait for Workshop Buyers re-extraction to complete on remote (~33K, all statuses)
+- [ ] Copy workshop-buyers.json from remote via AnyDesk
 - [ ] Take HubSpot backup export of Workshop Buyer contacts before run
 - [ ] Pause HubSpot workflows (Andy to confirm list)
 - [ ] Confirm lifecyclestage 2107021006 handling with Andy
-- [ ] Andy sign-off → run 1,834 Workshop Buyers enrichment (~5 min, 19 batches)
-- [ ] Automated validation (validate-pilot.js --count=200)
+- [ ] Andy sign-off → run ~33K Workshop Buyers enrichment via `npm run migrate:tier1`
+- [ ] Automated validation (`node scripts/validate-pilot.js --tier=1 --count=200`)
 - [ ] Manual spot-checks on edge cases
 - [ ] Build guest_of associations for Tier 1
 - [ ] Generate validation report → send to Alex + Brandon/Eddie/Jai/James
 
 ### Phase 4 — Tier 2 Migration (May 18–19)
-- [ ] Build scripts/extract-preview-buyers.js (pb tag filter — extraction strategy TBD)
-- [ ] Extract ~30K Preview Buyers
-- [ ] Run Tier 2 in batches — monitor API failures
+- [x] `scripts/extract-preview-buyers.js` built — pipeline `yZ49CJBYdHhC0IEIe9Cs`, all 4 statuses, no tag filter
+- [ ] Run `npm run extract:pb` on remote — extract ~30K Preview Buyers → `data/samples/preview-buyers.json`
+- [ ] Pilot Tier 2: `node scripts/pilot-run.js --tier=2 --count=10`
+- [ ] Validate Tier 2 pilot: `node scripts/validate-pilot.js --tier=2 --count=10`
+- [ ] Run Tier 2 migration: `npm run migrate:tier2`
 - [ ] Process cross-tier guest_of associations
 - [ ] Automated validation + dedup report
 - [ ] Tier 2 sign-off report
 
 ### Phase 5 — Tier 3 + Handoff (May 20–22 — Overnight Runs)
-- [ ] Design Tier 3 extraction strategy for ~800K General Registrants (contact list scan with hs-to-hl filter — approach not yet built)
-- [ ] Build scripts/extract-registrants.js
-- [ ] Run 800K overnight (May 20–21) — monitor with alerts
+- [x] Tier 3 extraction strategy: contacts API cursor-based pagination, exclude `hs_transfer`/`hs-to-hl` tags
+- [x] `scripts/extract-registrants.js` built — `npm run extract:reg:sample` (100 contacts) / `npm run extract:reg` (full 900K cap)
+- [ ] Run `npm run extract:reg:sample` on remote — 100 contacts for Tier 3 pilot
+- [ ] Pilot Tier 3: `node scripts/pilot-run.js --tier=3 --count=10`
+- [ ] Validate Tier 3 pilot: `node scripts/validate-pilot.js --tier=3 --count=10`
+- [ ] Run `npm run extract:reg` on remote overnight — full ~800K General Registrants
+- [ ] Run Tier 3 migration: `npm run migrate:tier3` (overnight, May 20–21)
+- [ ] Monitor overnight run with alerts
 - [ ] Final association pass
 - [ ] Global QA: count reconciliation, dedup scan, field completeness
 - [ ] Write documentation for client team
@@ -373,7 +383,7 @@ Andy confirmed (May 15) his team will keep Preview deal backfill in their own co
 |------|-----|------|--------|
 | May 14 (Wed) | Day 9 | Apply property renames (engager_contact_id, utm_source/medium) · Build load module (hubspotClient, batchUpserter, checkpoint, rateLimiter) · Build migrate-tier.js · Add contact owner lookup · Sandbox prep | ✅ Complete |
 | May 15 (Thu) | Day 10 | PROD pilot: 10/10 succeeded · Validation: 7/10 PASS · Extract: 1,834 WBs confirmed · Andy review scheduled weekend | ✅ Complete |
-| May 16 (Fri) | Day 11 | Build Tier 2 extractor (extract-preview-buyers.js) · Tier 1 pre-flight prep | 🔄 In Progress |
+| May 16 (Fri) | Day 11 | Build Tier 2 extractor (extract-preview-buyers.js) · Build Tier 3 extractor (extract-registrants.js) · Generalize pilot-run.js + validate-pilot.js for all tiers · Fix SSL/429/400 retries in extract-wb · Remove tag filter + add all statuses to extract-wb · Re-extract WBs (~33K) in progress on remote | ✅ Complete |
 | May 17 (Sat) | Day 12 | Andy sign-off · Tier 1 run: 1,834 Workshop Buyers · Validation · guest_of associations · Report | ⬜ Pending |
 | May 18 (Sun) | Day 13 | Tier 2 extract + run: ~30K Preview Buyers | ⬜ Pending |
 | May 19 (Mon) | Day 14 | Tier 2 complete · Validation · Report to Alex + Brandon/Eddie/Jai/James | ⬜ Pending |

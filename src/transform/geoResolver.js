@@ -54,7 +54,21 @@ const CITY_CODE_MAP = {
   mem: 'Memphis',
   bos: 'Boston',
   ods: 'Odessa',
-  // Add codes as unknowns surface in logs
+  ewr: 'Newark',
+  sea: 'Seattle',
+  anc: 'Anchorage',
+  ftm: 'Fort Myers',
+  bwi: 'Baltimore',
+  mco: 'Orlando',
+  jax: 'Jacksonville',
+  ftl: 'Fort Lauderdale',
+  cmh: 'Columbus',
+  ric: 'Richmond',
+  clt: 'Charlotte',
+  mci: 'Kansas City',
+  ken: 'Kennewick',
+  gsb: 'Greensboro',
+  bmh: 'Birmingham',
 };
 
 /**

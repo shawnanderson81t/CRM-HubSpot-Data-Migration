@@ -89,13 +89,20 @@ export class BatchUpserter {
     // email/phone/GHL-ID exists on more than one record. Writing these identity fields
     // to the matched record (which may have been matched by a different key) causes
     // HubSpot uniqueness violations. We already have the HS ID — we don't need them.
+    //
+    // Also dedup by hubspotId: two GHL contacts can resolve to the same HS record via
+    // different lookup keys (email vs phone vs engager_id). HubSpot rejects the batch
+    // with "Duplicate IDs found" if we send the same HS ID twice.
     if (updates.length > 0) {
-      const res = await this.hs.batchUpdateContacts(
-        updates.map(u => {
-          const { engager_contact_id, email, phone, ...safeProps } = u.properties;
-          return { hubspotId: u.hubspotId, properties: safeProps };
-        })
-      );
+      const safeUpdates = updates.map(u => {
+        const { engager_contact_id, email, phone, ...safeProps } = u.properties;
+        return { hubspotId: u.hubspotId, properties: safeProps };
+      });
+      const uniqueUpdates = [...new Map(safeUpdates.map(u => [u.hubspotId, u])).values()];
+      if (safeUpdates.length !== uniqueUpdates.length) {
+        logger.warn(`Batch ${batchNumber}: deduped ${safeUpdates.length - uniqueUpdates.length} duplicate hubspotIds from update batch`);
+      }
+      const res = await this.hs.batchUpdateContacts(uniqueUpdates);
       succeeded += res.succeeded;
       failed    += res.failed;
       errors.push(...res.errors);

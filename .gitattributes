@@ -1,0 +1,6 @@
+# Normalize line endings: store as LF, checkout as-is on all platforms
+* text=auto eol=lf
+*.js eol=lf
+*.json eol=lf
+*.md eol=lf
+*.sh eol=lf

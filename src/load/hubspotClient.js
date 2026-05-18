@@ -59,7 +59,7 @@ export class HubSpotClient {
         return await fn();
       } catch (err) {
         const status = err.response?.status;
-        const retryable = status === 429 || (status >= 500 && status < 600);
+        const retryable = !err.response || status === 429 || (status >= 500 && status < 600);
         if (!retryable || attempt >= MAX_RETRIES) throw err;
 
         const retryAfterSec = parseInt(err.response?.headers?.['retry-after'] || '0');
@@ -162,6 +162,23 @@ export class HubSpotClient {
         );
         succeeded++;
       } catch (patchErr) {
+        // A different field on this specific contact is also invalid — strip it and retry once more
+        if (patchErr.response?.status === 400) {
+          const moreInvalid = parseInvalidOptionFields(patchErr.response?.data);
+          if (moreInvalid.size > 0) {
+            const allStrip = new Set([...stripFields, ...moreInvalid]);
+            const retryProps = Object.fromEntries(
+              Object.entries(record.properties).filter(([k]) => !allStrip.has(k))
+            );
+            try {
+              await this._withRetry(() =>
+                this.client.patch(`/crm/v3/objects/contacts/${record.hubspotId}`, { properties: retryProps })
+              );
+              succeeded++;
+              continue;
+            } catch { /* fall through to fail */ }
+          }
+        }
         failed++;
         errors.push({
           hubspotId: record.hubspotId,

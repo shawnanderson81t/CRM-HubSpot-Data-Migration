@@ -19,73 +19,39 @@ const client = axios.create({
   },
 });
 
-const PREVIEW_TAGS = ['phase-preview-buyer', 'phase_preview-attendee', 'phase_preview-reg', 'phase_preview-non-attendee', 'pna'];
+const PREVIEW_TAGS = [
+  'pna',
+  'phase_preview-non-attendee',
+  'phase_preview-reg',
+  'phase_preview-attendee',
+  'phase-preview-buyer',
+];
 
 async function run() {
   const locationId = config.ghl.locationId;
 
-  // Test 1: total count across all preview tags (OR) — how many contacts are we targeting?
-  console.log('\nTest 1 — total preview contacts (all tags, OR)...');
-  try {
-    const res = await client.post('/contacts/search', {
-      locationId,
-      filters: PREVIEW_TAGS.map(t => ({ field: 'tags', operator: 'contains', value: t })),
-      pageLimit: 1,
-    });
-    console.log(`  total: ${res.data?.total}`);
-    console.log(`  contacts returned: ${(res.data?.contacts ?? []).length}`);
-    console.log(`  all response keys: ${Object.keys(res.data ?? {}).join(', ')}`);
-  } catch (err) {
-    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
+  // Count per tag (1 contact fetch each — just need the total field)
+  console.log('\nTag counts (total contacts per preview tag):');
+  console.log('─'.repeat(55));
+  let grandTotal = 0;
+  for (const tag of PREVIEW_TAGS) {
+    try {
+      const res = await client.post('/contacts/search', {
+        locationId,
+        filters: [{ field: 'tags', operator: 'contains', value: tag }],
+        pageLimit: 1,
+        page: 1,
+      });
+      const total = res.data?.total ?? '?';
+      grandTotal += typeof total === 'number' ? total : 0;
+      console.log(`  ${tag.padEnd(35)} ${String(total).padStart(8)}`);
+    } catch (err) {
+      console.log(`  ${tag.padEnd(35)} FAILED: ${err.response?.status}`);
+    }
   }
-
-  // Test 2: pagination — does `page` work?
-  console.log('\nTest 2 — pagination via page number...');
-  try {
-    const res1 = await client.post('/contacts/search', {
-      locationId,
-      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
-      pageLimit: 3,
-      page: 1,
-    });
-    const res2 = await client.post('/contacts/search', {
-      locationId,
-      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
-      pageLimit: 3,
-      page: 2,
-    });
-    const ids1 = (res1.data?.contacts ?? []).map(c => c.id);
-    const ids2 = (res2.data?.contacts ?? []).map(c => c.id);
-    console.log(`  page 1 ids: ${ids1.join(', ')}`);
-    console.log(`  page 2 ids: ${ids2.join(', ')}`);
-    console.log(`  overlap: ${ids1.filter(id => ids2.includes(id)).length} (should be 0)`);
-  } catch (err) {
-    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
-  }
-
-  // Test 3: pagination via startAfterId
-  console.log('\nTest 3 — pagination via startAfterId...');
-  try {
-    const res1 = await client.post('/contacts/search', {
-      locationId,
-      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
-      pageLimit: 3,
-    });
-    const lastId = res1.data?.contacts?.at(-1)?.id;
-    const res2 = await client.post('/contacts/search', {
-      locationId,
-      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
-      pageLimit: 3,
-      startAfterId: lastId,
-    });
-    const ids1 = (res1.data?.contacts ?? []).map(c => c.id);
-    const ids2 = (res2.data?.contacts ?? []).map(c => c.id);
-    console.log(`  page 1 ids: ${ids1.join(', ')}`);
-    console.log(`  page 2 ids: ${ids2.join(', ')}`);
-    console.log(`  overlap: ${ids1.filter(id => ids2.includes(id)).length} (should be 0)`);
-  } catch (err) {
-    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
-  }
+  console.log('─'.repeat(55));
+  console.log(`  ${'TOTAL (with overlap)'.padEnd(35)} ${String(grandTotal).padStart(8)}`);
+  console.log('\nNote: contacts can have multiple tags so unique count will be less than total above.');
 }
 
 run().catch(err => {

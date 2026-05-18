@@ -19,58 +19,70 @@ const client = axios.create({
   },
 });
 
+const PREVIEW_TAGS = ['phase-preview-buyer', 'phase_preview-attendee', 'phase_preview-reg', 'phase_preview-non-attendee', 'pna'];
+
 async function run() {
   const locationId = config.ghl.locationId;
 
-  // Test 1: single tag, correct field names from error message
-  console.log('\nTest 1 — single tag filter (contains, pageLimit)...');
+  // Test 1: total count across all preview tags (OR) — how many contacts are we targeting?
+  console.log('\nTest 1 — total preview contacts (all tags, OR)...');
   try {
     const res = await client.post('/contacts/search', {
+      locationId,
+      filters: PREVIEW_TAGS.map(t => ({ field: 'tags', operator: 'contains', value: t })),
+      pageLimit: 1,
+    });
+    console.log(`  total: ${res.data?.total}`);
+    console.log(`  contacts returned: ${(res.data?.contacts ?? []).length}`);
+    console.log(`  all response keys: ${Object.keys(res.data ?? {}).join(', ')}`);
+  } catch (err) {
+    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
+  }
+
+  // Test 2: pagination — does `page` work?
+  console.log('\nTest 2 — pagination via page number...');
+  try {
+    const res1 = await client.post('/contacts/search', {
       locationId,
       filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
-      pageLimit: 5,
+      pageLimit: 3,
+      page: 1,
     });
-    console.log(`  OK — contacts: ${(res.data?.contacts ?? []).length}`);
-    console.log(`  Response keys: ${Object.keys(res.data ?? {}).join(', ')}`);
-    console.log(`  Meta: ${JSON.stringify(res.data?.meta ?? {})}`);
-    if (res.data?.contacts?.[0]) {
-      console.log(`  First contact tags: ${JSON.stringify(res.data.contacts[0].tags?.slice(0, 5))}`);
-    }
+    const res2 = await client.post('/contacts/search', {
+      locationId,
+      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
+      pageLimit: 3,
+      page: 2,
+    });
+    const ids1 = (res1.data?.contacts ?? []).map(c => c.id);
+    const ids2 = (res2.data?.contacts ?? []).map(c => c.id);
+    console.log(`  page 1 ids: ${ids1.join(', ')}`);
+    console.log(`  page 2 ids: ${ids2.join(', ')}`);
+    console.log(`  overlap: ${ids1.filter(id => ids2.includes(id)).length} (should be 0)`);
   } catch (err) {
     console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
   }
 
-  // Test 2: try contains_set operator (may match "tag is in array")
-  console.log('\nTest 2 — contains_set operator...');
+  // Test 3: pagination via startAfterId
+  console.log('\nTest 3 — pagination via startAfterId...');
   try {
-    const res = await client.post('/contacts/search', {
+    const res1 = await client.post('/contacts/search', {
       locationId,
-      filters: [{ field: 'tags', operator: 'contains_set', value: 'pna' }],
-      pageLimit: 5,
+      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
+      pageLimit: 3,
     });
-    console.log(`  OK — contacts: ${(res.data?.contacts ?? []).length}`);
-    if (res.data?.contacts?.[0]) {
-      console.log(`  First contact tags: ${JSON.stringify(res.data.contacts[0].tags?.slice(0, 5))}`);
-    }
-  } catch (err) {
-    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
-  }
-
-  // Test 3: OR across multiple preview tags using nested filters
-  console.log('\nTest 3 — OR across multiple preview tags...');
-  try {
-    const res = await client.post('/contacts/search', {
+    const lastId = res1.data?.contacts?.at(-1)?.id;
+    const res2 = await client.post('/contacts/search', {
       locationId,
-      filters: [
-        { field: 'tags', operator: 'contains', value: 'pna' },
-        { field: 'tags', operator: 'contains', value: 'phase_preview-attendee' },
-      ],
-      pageLimit: 5,
+      filters: [{ field: 'tags', operator: 'contains', value: 'pna' }],
+      pageLimit: 3,
+      startAfterId: lastId,
     });
-    console.log(`  OK — contacts: ${(res.data?.contacts ?? []).length}`);
-    if (res.data?.contacts?.[0]) {
-      console.log(`  First contact tags: ${JSON.stringify(res.data.contacts[0].tags?.slice(0, 5))}`);
-    }
+    const ids1 = (res1.data?.contacts ?? []).map(c => c.id);
+    const ids2 = (res2.data?.contacts ?? []).map(c => c.id);
+    console.log(`  page 1 ids: ${ids1.join(', ')}`);
+    console.log(`  page 2 ids: ${ids2.join(', ')}`);
+    console.log(`  overlap: ${ids1.filter(id => ids2.includes(id)).length} (should be 0)`);
   } catch (err) {
     console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
   }

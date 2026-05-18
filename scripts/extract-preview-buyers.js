@@ -256,6 +256,8 @@ async function run() {
     tags: (c.tags ?? []).slice(0, 5),
   }));
 
+  const unique = [...new Map(contacts.map(c => [c.id, c])).values()];
+
   const report = {
     timestamp: new Date().toISOString(),
     strategy: 'pipeline-opportunities-all-statuses',
@@ -267,8 +269,6 @@ async function run() {
     fieldCoverage: coveragePct,
     topTags,
   };
-
-  const unique = [...new Map(contacts.map(c => [c.id, c])).values()];
   if (unique.length !== contacts.length) {
     logger.warn(`Dedup: removed ${contacts.length - unique.length} duplicate contacts before writing`);
     console.log(`  ⚠ Removed ${contacts.length - unique.length} duplicates (GHL pagination overlap)`);

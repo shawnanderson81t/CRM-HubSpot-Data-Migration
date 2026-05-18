@@ -103,6 +103,7 @@ const CANCELLATION_TAG_MAP = {
   workshop_cancel_reg:      'Workshop Cancelled',
   foundations_cancel_reg:   'Foundations Cancelled',
   all_products_cancelled:   'All Cancelled',
+  cancel:                   'All Cancelled',
 };
 
 /** Fulfillment tags in priority order — highest status wins (single-select property) */

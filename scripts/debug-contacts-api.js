@@ -20,41 +20,77 @@ const client = axios.create({
 });
 
 async function run() {
-  // Test 1: plain list — check meta for total count
-  const res1 = await client.get('/contacts/', {
-    params: { locationId: config.ghl.locationId, limit: 5 },
-  });
-  console.log(`\nTest 1 — plain list meta:`);
-  console.log(JSON.stringify(res1.data?.meta ?? {}, null, 2));
+  const locationId = config.ghl.locationId;
 
-  // Test 2: with startDate/endDate — does GHL support date filtering?
-  const res2 = await client.get('/contacts/', {
-    params: {
-      locationId: config.ghl.locationId,
-      limit: 5,
-      startDate: '2024-01-01T00:00:00.000Z',
-      endDate:   '2024-06-30T23:59:59.999Z',
-    },
-  });
-  console.log(`\nTest 2 — with startDate/endDate (2024 H1):`);
-  console.log(`  contacts returned: ${(res2.data?.contacts ?? []).length}`);
-  console.log(`  meta: ${JSON.stringify(res2.data?.meta ?? {})}`);
-  if (res2.data?.contacts?.length) {
-    console.log(`  first contact dateAdded: ${res2.data.contacts[0].dateAdded}`);
+  // Test 1: POST /contacts/search with tag filter (recommended modern endpoint)
+  console.log('\nTest 1 — POST /contacts/search with tag filter (pna)...');
+  try {
+    const res = await client.post('/contacts/search', {
+      locationId,
+      filters: [
+        { field: 'tags', operator: 'CONTAINS', value: 'pna' }
+      ],
+      page: 1,
+      pageSize: 5,
+    });
+    console.log(`  Status: OK`);
+    console.log(`  Contacts returned: ${(res.data?.contacts ?? []).length}`);
+    console.log(`  Meta: ${JSON.stringify(res.data?.meta ?? res.data?.total ?? {})}`);
+    if (res.data?.contacts?.length) {
+      console.log(`  First contact tags: ${JSON.stringify(res.data.contacts[0].tags?.slice(0, 5))}`);
+    }
+  } catch (err) {
+    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
   }
 
-  // Test 3: with query param — does GHL support tag search?
-  const res3 = await client.get('/contacts/', {
-    params: {
-      locationId: config.ghl.locationId,
-      limit: 5,
-      query: 'pna',
-    },
-  });
-  console.log(`\nTest 3 — with query=pna:`);
-  console.log(`  contacts returned: ${(res3.data?.contacts ?? []).length}`);
-  if (res3.data?.contacts?.length) {
-    console.log(`  first contact tags: ${JSON.stringify(res3.data.contacts[0].tags)}`);
+  // Test 2: POST /contacts/search with alternative filter format
+  console.log('\nTest 2 — POST /contacts/search alternative filter format...');
+  try {
+    const res = await client.post('/contacts/search', {
+      locationId,
+      filters: [
+        {
+          group: 'AND',
+          filters: [
+            { type: 'FIELD', field: { key: 'tags' }, condition: 'CONTAINS', value: 'pna' }
+          ]
+        }
+      ],
+      page: 1,
+      pageSize: 5,
+    });
+    console.log(`  Status: OK`);
+    console.log(`  Contacts returned: ${(res.data?.contacts ?? []).length}`);
+    console.log(`  Meta: ${JSON.stringify(res.data?.meta ?? res.data?.total ?? {})}`);
+  } catch (err) {
+    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
+  }
+
+  // Test 3: GET /contacts/search (some GHL versions use GET)
+  console.log('\nTest 3 — GET /contacts/search with tag param...');
+  try {
+    const res = await client.get('/contacts/search', {
+      params: { locationId, limit: 5, tag: 'pna' },
+    });
+    console.log(`  Status: OK`);
+    console.log(`  Contacts returned: ${(res.data?.contacts ?? []).length}`);
+    console.log(`  Response keys: ${Object.keys(res.data ?? {}).join(', ')}`);
+  } catch (err) {
+    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
+  }
+
+  // Test 4: GET /contacts/ with tags[] filter param
+  console.log('\nTest 4 — GET /contacts/ with tags param...');
+  try {
+    const res = await client.get('/contacts/', {
+      params: { locationId, limit: 5, 'filters[tags]': 'pna' },
+    });
+    console.log(`  Contacts returned: ${(res.data?.contacts ?? []).length}`);
+    if (res.data?.contacts?.[0]) {
+      console.log(`  First contact tags: ${JSON.stringify(res.data.contacts[0].tags?.slice(0, 5))}`);
+    }
+  } catch (err) {
+    console.log(`  FAILED: ${err.response?.status} — ${JSON.stringify(err.response?.data)}`);
   }
 }
 

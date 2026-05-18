@@ -20,20 +20,41 @@ const client = axios.create({
 });
 
 async function run() {
-  const res = await client.get('/contacts/', {
+  // Test 1: plain list — check meta for total count
+  const res1 = await client.get('/contacts/', {
     params: { locationId: config.ghl.locationId, limit: 5 },
   });
+  console.log(`\nTest 1 — plain list meta:`);
+  console.log(JSON.stringify(res1.data?.meta ?? {}, null, 2));
 
-  const contacts = res.data?.contacts ?? [];
-  console.log(`\nContacts returned: ${contacts.length}`);
-  console.log(`\nFields present on first contact:`);
-  console.log(Object.keys(contacts[0] ?? {}).join(', '));
+  // Test 2: with startDate/endDate — does GHL support date filtering?
+  const res2 = await client.get('/contacts/', {
+    params: {
+      locationId: config.ghl.locationId,
+      limit: 5,
+      startDate: '2024-01-01T00:00:00.000Z',
+      endDate:   '2024-06-30T23:59:59.999Z',
+    },
+  });
+  console.log(`\nTest 2 — with startDate/endDate (2024 H1):`);
+  console.log(`  contacts returned: ${(res2.data?.contacts ?? []).length}`);
+  console.log(`  meta: ${JSON.stringify(res2.data?.meta ?? {})}`);
+  if (res2.data?.contacts?.length) {
+    console.log(`  first contact dateAdded: ${res2.data.contacts[0].dateAdded}`);
+  }
 
-  console.log(`\nFirst 5 contacts — tags field:`);
-  for (const c of contacts) {
-    const name = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim();
-    const tags = c.tags;
-    console.log(`  ${c.id}  ${name.padEnd(25)}  tags type=${typeof tags}  value=${JSON.stringify(tags)}`);
+  // Test 3: with query param — does GHL support tag search?
+  const res3 = await client.get('/contacts/', {
+    params: {
+      locationId: config.ghl.locationId,
+      limit: 5,
+      query: 'pna',
+    },
+  });
+  console.log(`\nTest 3 — with query=pna:`);
+  console.log(`  contacts returned: ${(res3.data?.contacts ?? []).length}`);
+  if (res3.data?.contacts?.length) {
+    console.log(`  first contact tags: ${JSON.stringify(res3.data.contacts[0].tags)}`);
   }
 }
 

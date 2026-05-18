@@ -1,23 +1,26 @@
 /**
- * Extract Preview Buyers from GHL via the contacts API (cursor-based pagination).
+ * Extract Preview Buyers from GHL via POST /contacts/search (tag filter).
  *
- * Strategy: scan all GHL contacts using the same cursor approach as Tier 3.
- * Include contacts that carry any preview buyer-tier tag. The pipeline-based
- * approach (opportunities search) is capped at ~10K results per status by
- * the GHL API, making it unsuitable for the 734K-opp Preview Registrants
- * pipeline. Cursor pagination has no such limit.
+ * Strategy: use GHL's search endpoint to fetch contacts by tag directly,
+ * avoiding the two known GHL API limitations:
+ *   - GET /contacts/ cursor caps at ~100K records
+ *   - GET /opportunities/search caps at ~10K results per status
  *
- * Include filter — contact must have at least one of:
- *   phase-preview-buyer        Preview Buyer (paid)
- *   phase_preview-attendee     Preview Attendee
- *   phase_preview-reg          Preview Registrant
- *   phase_preview-non-attendee Preview Non-Attendee
+ * POST /contacts/search supports tag filtering with page-based pagination.
+ * Multiple filters are ANDed — so we run one search per preview tag and
+ * merge results (dedup by contact ID).
+ *
+ * Preview tags searched (OR across separate calls):
  *   pna                        Preview Non-Attendee (short alias)
+ *   phase_preview-non-attendee Preview Non-Attendee
+ *   phase_preview-reg          Preview Registrant
+ *   phase_preview-attendee     Preview Attendee
+ *   phase-preview-buyer        Preview Buyer (paid)
  *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
- *   - Checkpoints every 500 contacts to data/checkpoints/extract-pb.*
- *   - --resume flag resumes from last checkpoint — no data lost on crash
+ *   - Checkpoints after each tag completes
+ *   - --resume flag skips already-completed tags
  *
  * Usage:
  *   node scripts/extract-preview-buyers.js
@@ -31,7 +34,7 @@
  */
 
 import dotenv from 'dotenv';
-import { writeFileSync, readFileSync, mkdirSync, appendFileSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig } from '../src/utils/config.js';
@@ -44,68 +47,79 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLES_DIR     = join(__dirname, '../data/samples');
 const REPORTS_DIR     = join(__dirname, '../data/reports');
 const CHECKPOINTS_DIR = join(__dirname, '../data/checkpoints');
-const CP_POS_FILE     = join(CHECKPOINTS_DIR, 'extract-pb.json');
-const CP_DATA_FILE    = join(CHECKPOINTS_DIR, 'extract-pb-contacts.ndjson');
+const CP_FILE         = join(CHECKPOINTS_DIR, 'extract-pb.json');
 
-const TARGET_COUNT     = parseInt(process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '900000');
-const RESUME           = process.argv.includes('--resume');
-const CHECKPOINT_EVERY    = 500;   // collected contacts between data checkpoints
-const CURSOR_SAVE_EVERY   = 50000; // contacts scanned between cursor-only saves
+const RESUME = process.argv.includes('--resume');
 
-/** Tags that identify a contact as a Preview Buyer for Tier 2. */
-const PREVIEW_TAGS = new Set([
-  'phase-preview-buyer',
-  'phase_preview-attendee',
-  'phase_preview-reg',
-  'phase_preview-non-attendee',
+/**
+ * Preview tags — searched individually (GHL AND-s multiple filters).
+ * Order: most common first to collect the bulk quickly.
+ */
+const PREVIEW_TAGS = [
   'pna',
-]);
+  'phase_preview-non-attendee',
+  'phase_preview-reg',
+  'phase_preview-attendee',
+  'phase-preview-buyer',
+];
 
-const isPreviewContact = tags => (tags ?? []).some(t => PREVIEW_TAGS.has(t));
-
-const RETRYABLE = new Set([429, 502, 503, 504]);
-const sleep     = ms => new Promise(r => setTimeout(r, ms));
+const PAGE_LIMIT  = 100;
+const RETRYABLE   = new Set([429, 502, 503, 504]);
+const sleep       = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Checkpoint helpers ────────────────────────────────────────────────────────
 
-function saveCheckpoint(pos) {
+function saveCheckpoint(state) {
   mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  writeFileSync(CP_POS_FILE, JSON.stringify(pos));
-}
-
-function appendContactsToCheckpoint(contacts) {
-  mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  appendFileSync(CP_DATA_FILE, contacts.map(c => JSON.stringify(c)).join('\n') + '\n');
+  writeFileSync(CP_FILE, JSON.stringify(state));
 }
 
 function loadCheckpoint() {
-  if (!existsSync(CP_POS_FILE)) return null;
-  try {
-    const pos       = JSON.parse(readFileSync(CP_POS_FILE, 'utf-8'));
-    const collected = existsSync(CP_DATA_FILE)
-      ? readFileSync(CP_DATA_FILE, 'utf-8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
-      : [];
-    return { ...pos, collected };
-  } catch {
-    return null;
-  }
+  if (!existsSync(CP_FILE)) return null;
+  try { return JSON.parse(readFileSync(CP_FILE, 'utf-8')); } catch { return null; }
 }
 
 function clearCheckpoint() {
-  try { unlinkSync(CP_POS_FILE); } catch {}
-  try { unlinkSync(CP_DATA_FILE); } catch {}
+  try { unlinkSync(CP_FILE); } catch {}
+}
+
+// ── Search with retry ─────────────────────────────────────────────────────────
+
+/**
+ * @param {Object} client - axios instance
+ * @param {string} locationId
+ * @param {string} tag - single tag to search for
+ * @param {number} page - 1-based page number
+ * @returns {Promise<{ contacts: Array, total: number }>}
+ */
+async function searchByTag(client, locationId, tag, page, retries = 6) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await client.post('/contacts/search', {
+        locationId,
+        filters: [{ field: 'tags', operator: 'contains', value: tag }],
+        pageLimit: PAGE_LIMIT,
+        page,
+      });
+      return { contacts: res.data?.contacts ?? [], total: res.data?.total ?? 0 };
+    } catch (err) {
+      const status      = err.response?.status;
+      const isRetryable = RETRYABLE.has(status) || !status;
+      if (isRetryable && attempt < retries) {
+        const delay = 2000 * attempt;
+        logger.warn(`GHL ${status ?? 'SSL/network'} on tag=${tag} page=${page} — retry ${attempt}/${retries - 1} in ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(`search tag=${tag} page=${page} failed: ${err.message}`);
+    }
+  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   const config = loadConfig();
-
-  console.log(`\n=== GHL Extract — Preview Buyers (contacts API cursor) ===`);
-  console.log(`  Strategy : cursor-based contact pagination (no page cap)`);
-  console.log(`  Include  : contacts with any preview buyer-tier tag`);
-  console.log(`  Tags     : ${[...PREVIEW_TAGS].join(', ')}`);
-  console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
 
   const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
   const GHL_VERSION  = process.env.GHL_VERSION  || '2021-07-28';
@@ -119,153 +133,129 @@ async function main() {
     },
   });
 
-  let collected    = [];
-  let startAfterId = null;
-  let page         = 1;
-  let scanned      = 0;
-  let skipped      = 0;
-  let savedCount   = 0;
+  console.log(`\n=== GHL Extract — Preview Buyers (POST /contacts/search) ===`);
+  console.log(`  Strategy : per-tag search with page pagination`);
+  console.log(`  Tags     : ${PREVIEW_TAGS.join(', ')}`);
+  console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
+
+  // contactMap: id → contact (dedup across tags)
+  const contactMap    = new Map();
+  let completedTags   = [];
+  let tagStats        = {};
 
   if (RESUME) {
     const cp = loadCheckpoint();
     if (cp) {
-      collected    = cp.collected;
-      startAfterId = cp.startAfterId ?? null;
-      page         = cp.page ?? 1;
-      scanned      = cp.scanned ?? 0;
-      skipped      = cp.skipped ?? 0;
-      savedCount   = collected.length;
-      console.log(`  Resumed: ${collected.length} contacts already saved. Continuing from page ${page} (cursor: ${startAfterId ?? 'start'})\n`);
+      for (const [id, contact] of Object.entries(cp.contacts ?? {})) contactMap.set(id, contact);
+      completedTags = cp.completedTags ?? [];
+      tagStats      = cp.tagStats ?? {};
+      console.log(`  Resumed: ${contactMap.size} contacts loaded, tags done: [${completedTags.join(', ')}]\n`);
     } else {
       console.log('  No checkpoint found — starting fresh\n');
     }
   }
 
-  logger.info(`extract-pb: start — target=${TARGET_COUNT}, resume=${RESUME}, already=${collected.length}`);
+  logger.info(`extract-pb: start — resume=${RESUME}, already=${contactMap.size}`);
 
   const startTime = Date.now();
 
-  while (collected.length < TARGET_COUNT) {
-    const params = { locationId: config.ghl.locationId, limit: 100 };
-    if (startAfterId) params.startAfterId = startAfterId;
+  for (const tag of PREVIEW_TAGS) {
+    if (completedTags.includes(tag)) {
+      console.log(`  [${tag}] — skipped (already done)`);
+      continue;
+    }
 
-    let response;
-    let attempt = 0;
+    process.stdout.write(`  [${tag}] fetching...`);
+    let page         = 1;
+    let tagCollected = 0;
+    let total        = null;
+
     while (true) {
-      attempt++;
-      try {
-        response = await client.get('/contacts/', { params });
-        break;
-      } catch (err) {
-        const status      = err.response?.status;
-        const isRetryable = RETRYABLE.has(status) || !status;
-        if (isRetryable && attempt <= 6) {
-          const delay = 2000 * attempt;
-          logger.warn(`GHL ${status ?? 'SSL/network'} error on page ${page} — retry ${attempt} in ${delay}ms`);
-          await sleep(delay);
-          continue;
-        }
-        throw new Error(`Contacts page ${page} failed: ${err.message}`);
+      const { contacts, total: t } = await searchByTag(client, config.ghl.locationId, tag, page);
+
+      if (total === null) {
+        total = t;
+        process.stdout.write(` total=${total}\n`);
       }
-    }
 
-    const contacts = response.data?.contacts ?? [];
-    const meta     = response.data?.meta ?? {};
-    scanned       += contacts.length;
-
-    if (contacts.length === 0) break;
-
-    for (const contact of contacts) {
-      if (collected.length >= TARGET_COUNT) break;
-      if (!isPreviewContact(contact.tags)) {
-        skipped++;
-        continue;
+      for (const contact of contacts) {
+        if (!contactMap.has(contact.id)) contactMap.set(contact.id, contact);
+        tagCollected++;
       }
-      collected.push(contact);
+
+      process.stdout.write(
+        `\r  [${tag}] page ${page} — tag contacts: ${tagCollected}/${total} | unique total: ${contactMap.size}  `
+      );
+
+      if (contacts.length < PAGE_LIMIT) break;
+      page++;
+
+      await sleep(200);
     }
 
-    process.stdout.write(
-      `\r  Scanned: ${scanned} | Skipped: ${skipped} | Collected: ${collected.length} | Page: ${page}  `
-    );
+    console.log();
+    tagStats[tag] = { total, collected: tagCollected };
+    completedTags.push(tag);
 
-    if (collected.length - savedCount >= CHECKPOINT_EVERY) {
-      appendContactsToCheckpoint(collected.slice(savedCount));
-      savedCount = collected.length;
-      saveCheckpoint({ startAfterId, page, scanned, skipped });
-    } else if (scanned % CURSOR_SAVE_EVERY === 0) {
-      // Save cursor position even when collected=0 so resume doesn't re-scan from scratch
-      saveCheckpoint({ startAfterId, page, scanned, skipped });
-    }
+    saveCheckpoint({
+      completedTags,
+      tagStats,
+      contacts: Object.fromEntries(contactMap),
+    });
 
-    if (scanned % 10000 === 0) {
-      logger.info(`extract-pb page ${page}: scanned=${scanned}, skipped=${skipped}, collected=${collected.length}`);
-    }
-
-    startAfterId = meta.startAfterId ?? null;
-    if (!startAfterId || contacts.length < 100) break;
-    page++;
+    logger.info(`extract-pb tag=${tag}: total=${total}, collected=${tagCollected}, unique=${contactMap.size}`);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n\n  Done in ${elapsed}s`);
+  const contacts = [...contactMap.values()];
 
-  if (collected.length === 0) {
-    console.log('  No preview contacts found. Check tag filter and API key.');
+  console.log(`\n  Done in ${elapsed}s`);
+  console.log(`  Unique contacts collected: ${contacts.length}`);
+
+  if (contacts.length === 0) {
+    console.log('  No contacts found. Check tag names and API key.');
     process.exit(0);
   }
 
   const tagCounts = {};
-  for (const contact of collected) {
-    for (const tag of contact.tags ?? []) tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
+  for (const c of contacts) {
+    for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
   }
   const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30)
     .map(([tag, count]) => ({ tag, count }));
 
-  const sample = collected.slice(0, 5).map(c => ({
+  const sample = contacts.slice(0, 5).map(c => ({
     id: c.id,
     name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
     tags: (c.tags ?? []).slice(0, 5),
   }));
 
-  const unique = [...new Map(collected.map(c => [c.id, c])).values()];
-  if (unique.length !== collected.length) {
-    logger.warn(`Dedup: removed ${collected.length - unique.length} duplicate contacts before writing`);
-    console.log(`  ⚠ Removed ${collected.length - unique.length} duplicates (cursor pagination overlap)`);
-  }
-
   const report = {
     timestamp: new Date().toISOString(),
-    strategy: 'contacts-api-cursor-pagination',
-    includeFilter: [...PREVIEW_TAGS],
-    config: { targetCount: TARGET_COUNT },
-    results: {
-      pagesScanned: page,
-      contactsScanned: scanned,
-      nonPreviewSkipped: skipped,
-      contactsCollected: unique.length,
-      duplicatesRemoved: collected.length - unique.length,
-      elapsedSeconds: parseFloat(elapsed),
-    },
+    strategy: 'contacts-search-api-per-tag',
+    tags: PREVIEW_TAGS,
+    tagStats,
+    results: { contactsCollected: contacts.length, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
   };
 
   mkdirSync(SAMPLES_DIR, { recursive: true });
-  writeFileSync(join(SAMPLES_DIR, 'preview-buyers.json'), JSON.stringify(unique, null, 2));
+  writeFileSync(join(SAMPLES_DIR, 'preview-buyers.json'), JSON.stringify(contacts, null, 2));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
   const timestamp  = new Date().toISOString().replace(/[:.]/g, '-');
-  const reportPath = join(REPORTS_DIR, `extract-pb-${timestamp}.json`);
-  writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  writeFileSync(join(REPORTS_DIR, `extract-pb-${timestamp}.json`), JSON.stringify(report, null, 2));
 
   clearCheckpoint();
 
-  console.log(`=== Summary ===`);
-  console.log(`  Pages scanned        : ${page}`);
-  console.log(`  Contacts scanned     : ${scanned}`);
-  console.log(`  Non-preview skipped  : ${skipped}`);
-  console.log(`  Contacts collected   : ${unique.length} (${collected.length - unique.length} duplicates removed)`);
-  console.log(`  Elapsed              : ${elapsed}s`);
+  console.log(`\n=== Summary ===`);
+  console.log(`  Tag breakdown:`);
+  for (const [t, s] of Object.entries(tagStats)) {
+    console.log(`    ${t.padEnd(35)} total=${s.total}  collected=${s.collected}`);
+  }
+  console.log(`  Unique contacts : ${contacts.length}`);
+  console.log(`  Elapsed         : ${elapsed}s`);
   console.log(`\n  Output : data/samples/preview-buyers.json`);
   console.log(`  Report : data/reports/extract-pb-${timestamp}.json`);
 
@@ -274,7 +264,7 @@ async function main() {
     for (const s of sample) console.log(`    ${s.id}  ${s.name.padEnd(30)}  ${s.tags.join(', ')}`);
   }
 
-  logger.info('extract-preview-buyers complete', { collected: unique.length, skipped, elapsed });
+  logger.info('extract-preview-buyers complete', { collected: contacts.length, elapsed });
 }
 
 main().catch(err => {

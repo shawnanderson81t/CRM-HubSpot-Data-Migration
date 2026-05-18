@@ -220,6 +220,8 @@ async function main() {
     tags: (c.tags ?? []).slice(0, 5),
   }));
 
+  const unique = [...new Map(collected.map(c => [c.id, c])).values()];
+
   const report = {
     timestamp: new Date().toISOString(),
     strategy: 'contacts-api-cursor-pagination',
@@ -228,8 +230,6 @@ async function main() {
     sample,
     topTags,
   };
-
-  const unique = [...new Map(collected.map(c => [c.id, c])).values()];
   if (unique.length !== collected.length) {
     logger.warn(`Dedup: removed ${collected.length - unique.length} duplicate contacts before writing`);
     console.log(`  ⚠ Removed ${collected.length - unique.length} duplicates (cursor pagination overlap)`);

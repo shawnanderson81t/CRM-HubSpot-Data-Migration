@@ -49,7 +49,8 @@ const CP_DATA_FILE    = join(CHECKPOINTS_DIR, 'extract-pb-contacts.ndjson');
 
 const TARGET_COUNT     = parseInt(process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '900000');
 const RESUME           = process.argv.includes('--resume');
-const CHECKPOINT_EVERY = 500;
+const CHECKPOINT_EVERY    = 500;   // collected contacts between data checkpoints
+const CURSOR_SAVE_EVERY   = 50000; // contacts scanned between cursor-only saves
 
 /** Tags that identify a contact as a Preview Buyer for Tier 2. */
 const PREVIEW_TAGS = new Set([
@@ -190,6 +191,9 @@ async function main() {
     if (collected.length - savedCount >= CHECKPOINT_EVERY) {
       appendContactsToCheckpoint(collected.slice(savedCount));
       savedCount = collected.length;
+      saveCheckpoint({ startAfterId, page, scanned, skipped });
+    } else if (scanned % CURSOR_SAVE_EVERY === 0) {
+      // Save cursor position even when collected=0 so resume doesn't re-scan from scratch
       saveCheckpoint({ startAfterId, page, scanned, skipped });
     }
 

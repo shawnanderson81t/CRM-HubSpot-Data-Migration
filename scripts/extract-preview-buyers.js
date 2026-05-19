@@ -8,9 +8,8 @@
  * Filters applied per window:
  *   tag = phase-preview-buyer  AND  dateAdded >= windowStart  AND  dateAdded < windowEnd
  *
- * If Andy confirms phase_preview-attendee should also be included, add it
- * to BUYER_TAGS and re-run — the script will make a separate pass per tag
- * and deduplicate by contact ID.
+ * Andy confirmed (2026-05-18): include all 5 preview tags. Script makes a
+ * separate pass per tag and deduplicates by contact ID.
  *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
@@ -48,9 +47,15 @@ const RESUME = process.argv.includes('--resume');
 
 /**
  * Tags to extract — one pass per tag, results merged and deduped.
- * Add 'phase_preview-attendee' here if Andy confirms it belongs in Tier 2.
+ * Andy confirmed (2026-05-18): run the whole lot — all preview-tagged contacts.
  */
-const BUYER_TAGS = ['phase-preview-buyer'];
+const BUYER_TAGS = [
+  'phase-preview-buyer',        // 31K  — paid buyers
+  'phase_preview-attendee',     // 115K — attended preview event
+  'phase_preview-reg',          // 313K — registered for preview
+  'pna',                        // 110K — preview non-attendee (short form)
+  'phase_preview-non-attendee', // 361K — registered, did not attend
+];
 
 const PAGE_LIMIT      = 100;
 const WINDOW_START_YR = 2020;

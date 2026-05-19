@@ -80,6 +80,11 @@ const WARN_ONLY_FIELDS = new Set([
   'utm_source', 'utm_medium', 'cancellation_status',
 ]);
 
+// Fields compared case-insensitively — GHL stores names lowercase, HubSpot capitalizes them
+const CASE_INSENSITIVE_FIELDS = new Set([
+  'firstname', 'lastname',
+]);
+
 /**
  * Compare expected (from fieldMapper) vs actual (from HubSpot).
  * Returns array of mismatch objects.
@@ -111,6 +116,8 @@ function compareContact(email, expected, actual) {
       let matches;
       if (NUMERIC_FIELDS.has(key)) {
         matches = parseFloat(String(expVal)) === parseFloat(String(actVal));
+      } else if (CASE_INSENSITIVE_FIELDS.has(key)) {
+        matches = String(expVal).trim().toLowerCase() === String(actVal).trim().toLowerCase();
       } else {
         matches = String(expVal).trim() === String(actVal).trim();
       }

@@ -70,11 +70,12 @@ function monthlyWindows() {
   let month = 1;
 
   while (year < now.getFullYear() || (year === now.getFullYear() && month <= now.getMonth() + 1)) {
-    const start    = new Date(Date.UTC(year, month - 1, 1)).toISOString();
-    const nextMo   = month === 12 ? 1 : month + 1;
-    const nextYr   = month === 12 ? year + 1 : year;
-    const end      = new Date(Date.UTC(nextYr, nextMo - 1, 1)).toISOString();
-    windows.push({ label: `${year}-${String(month).padStart(2, '0')}`, start, end });
+    const gte    = new Date(Date.UTC(year, month - 1, 1)).toISOString();
+    const nextMo = month === 12 ? 1 : month + 1;
+    const nextYr = month === 12 ? year + 1 : year;
+    // lte = last millisecond of the month (one ms before start of next month)
+    const lte    = new Date(Date.UTC(nextYr, nextMo - 1, 1) - 1).toISOString();
+    windows.push({ label: `${year}-${String(month).padStart(2, '0')}`, gte, lte });
     month = nextMo;
     year  = nextYr;
   }
@@ -106,8 +107,7 @@ async function searchPage(client, locationId, tag, window, page, retries = 6) {
         locationId,
         filters: [
           { field: 'tags',      operator: 'contains', value: tag },
-          { field: 'dateAdded', operator: 'gte',      value: window.start },
-          { field: 'dateAdded', operator: 'lt',       value: window.end },
+          { field: 'dateAdded', operator: 'range',    value: { gte: window.gte, lte: window.lte } },
         ],
         pageLimit: PAGE_LIMIT,
         page,

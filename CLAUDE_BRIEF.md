@@ -337,6 +337,12 @@ src/
 - [x] Tier 2 pilot: 10/10 PASS, 0 warnings after fix
 - [x] Tier 2 migration ran: **31,224 succeeded, 5 failed, 15 skipped** (~47 min runtime)
 - [x] Report sent to Alex + Andy
+- [x] **5 failures investigated** — all are corrupted email addresses in GHL source data (not a pipeline issue). HubSpot correctly rejected them. Documented as data quality issues, no retry possible without knowing correct emails:
+  - `attilaiklady@yahoo.como` — typo: `.como` → `.com`
+  - `jon107@gmail.comavon.j.nels` — two emails concatenated in GHL
+  - `becalou7@gmail.comb` — typo: `.comb` → `.com`
+  - `candace@builttolastinvestors.ccm` — typo: `.ccm` → `.com`
+  - `kpitchernj@gmail.con` — typo: `.con` → `.com`
 
 **GHL extraction method — key findings (May 18–19):**
 - Pipeline/opportunities approach → 10K cap (GHL 100-page limit per status)
@@ -348,7 +354,7 @@ src/
 ### Phase 5 — Tier 3 + Handoff (May 20–22 — Overnight Runs)
 - [x] Tier 3 extraction strategy: GET /contacts/ cursor-based pagination, exclude `hs_transfer`/`hs-to-hl` tags
 - [x] `scripts/extract-registrants.js` built — `npm run extract:reg:sample` (100 contacts) / `npm run extract:reg` (full 900K cap). Checkpoints every 500 contacts. Resume-safe.
-- [ ] Run `npm run extract:reg:sample` on remote — 100 contacts for Tier 3 pilot
+- [x] Run `npm run extract:reg:sample` on remote — 99 contacts collected (1 duplicate removed, 1 sync contact skipped)
 - [ ] Pilot Tier 3: `node scripts/pilot-run.js --tier=3 --count=10`
 - [ ] Validate Tier 3 pilot: `node scripts/validate-pilot.js --tier=3 --count=10`
 - [ ] Run `npm run extract:reg` on remote overnight — full ~800K General Registrants

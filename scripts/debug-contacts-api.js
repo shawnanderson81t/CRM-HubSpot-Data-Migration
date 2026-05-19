@@ -53,40 +53,35 @@ async function run() {
     }
   }
 
-  // Test various date field names and value formats
-  await tryFilter('gte/lt ISO, field=dateAdded', [
-    { field: 'tags',      operator: 'contains', value: TAG },
-    { field: 'dateAdded', operator: 'gte',      value: isoStart },
-    { field: 'dateAdded', operator: 'lt',       value: isoEnd },
-  ]);
-
-  await tryFilter('gte/lt Unix ms, field=dateAdded', [
-    { field: 'tags',      operator: 'contains', value: TAG },
-    { field: 'dateAdded', operator: 'gte',      value: tsStart },
-    { field: 'dateAdded', operator: 'lt',       value: tsEnd },
-  ]);
-
-  await tryFilter('range operator, field=dateAdded', [
+  // range is the valid operator for dateAdded — test value formats
+  await tryFilter('range, value=ISO string comma', [
     { field: 'tags',      operator: 'contains', value: TAG },
     { field: 'dateAdded', operator: 'range',    value: `${isoStart},${isoEnd}` },
   ]);
 
-  await tryFilter('gte/lt ISO, field=date_added', [
-    { field: 'tags',       operator: 'contains', value: TAG },
-    { field: 'date_added', operator: 'gte',      value: isoStart },
-    { field: 'date_added', operator: 'lt',       value: isoEnd },
+  await tryFilter('range, value={from,to} ISO', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'range',    value: { from: isoStart, to: isoEnd } },
   ]);
 
-  await tryFilter('gte/lt ISO, field=createdAt', [
+  await tryFilter('range, value=[ISO, ISO] array', [
     { field: 'tags',      operator: 'contains', value: TAG },
-    { field: 'createdAt', operator: 'gte',      value: isoStart },
-    { field: 'createdAt', operator: 'lt',       value: isoEnd },
+    { field: 'dateAdded', operator: 'range',    value: [isoStart, isoEnd] },
   ]);
 
-  await tryFilter('gte/lt Unix ms, field=createdAt', [
+  await tryFilter('range, value={from,to} Unix ms', [
     { field: 'tags',      operator: 'contains', value: TAG },
-    { field: 'createdAt', operator: 'gte',      value: tsStart },
-    { field: 'createdAt', operator: 'lt',       value: tsEnd },
+    { field: 'dateAdded', operator: 'range',    value: { from: tsStart, to: tsEnd } },
+  ]);
+
+  await tryFilter('range, value=[Unix ms, Unix ms] array', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'range',    value: [tsStart, tsEnd] },
+  ]);
+
+  await tryFilter('range, value={gte,lte} ISO', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'range',    value: { gte: isoStart, lte: isoEnd } },
   ]);
 }
 

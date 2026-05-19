@@ -1,26 +1,21 @@
 /**
- * Extract Preview Buyers from GHL via POST /contacts/search (tag filter).
+ * Extract Preview Buyers from GHL via POST /contacts/search with date-range chunking.
  *
- * Strategy: use GHL's search endpoint to fetch contacts by tag directly,
- * avoiding the two known GHL API limitations:
- *   - GET /contacts/ cursor caps at ~100K records
- *   - GET /opportunities/search caps at ~10K results per status
+ * Strategy: GHL's search API caps at 100 pages (10,000 contacts) per query.
+ * `phase-preview-buyer` has ~31K contacts, so we chunk by month (dateAdded).
+ * Each monthly window stays well under 10K, giving us full coverage.
  *
- * POST /contacts/search supports tag filtering with page-based pagination.
- * Multiple filters are ANDed — so we run one search per preview tag and
- * merge results (dedup by contact ID).
+ * Filters applied per window:
+ *   tag = phase-preview-buyer  AND  dateAdded >= windowStart  AND  dateAdded < windowEnd
  *
- * Preview tags searched (OR across separate calls):
- *   pna                        Preview Non-Attendee (short alias)
- *   phase_preview-non-attendee Preview Non-Attendee
- *   phase_preview-reg          Preview Registrant
- *   phase_preview-attendee     Preview Attendee
- *   phase-preview-buyer        Preview Buyer (paid)
+ * If Andy confirms phase_preview-attendee should also be included, add it
+ * to BUYER_TAGS and re-run — the script will make a separate pass per tag
+ * and deduplicate by contact ID.
  *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
- *   - Checkpoints after each tag completes
- *   - --resume flag skips already-completed tags
+ *   - Checkpoints after each completed month — resume skips done windows
+ *   - --resume flag loads checkpoint and continues
  *
  * Usage:
  *   node scripts/extract-preview-buyers.js
@@ -52,20 +47,39 @@ const CP_FILE         = join(CHECKPOINTS_DIR, 'extract-pb.json');
 const RESUME = process.argv.includes('--resume');
 
 /**
- * Preview tags — searched individually (GHL AND-s multiple filters).
- * Order: most common first to collect the bulk quickly.
+ * Tags to extract — one pass per tag, results merged and deduped.
+ * Add 'phase_preview-attendee' here if Andy confirms it belongs in Tier 2.
  */
-const PREVIEW_TAGS = [
-  'pna',
-  'phase_preview-non-attendee',
-  'phase_preview-reg',
-  'phase_preview-attendee',
-  'phase-preview-buyer',
-];
+const BUYER_TAGS = ['phase-preview-buyer'];
 
-const PAGE_LIMIT  = 100;
-const RETRYABLE   = new Set([429, 502, 503, 504]);
-const sleep       = ms => new Promise(r => setTimeout(r, ms));
+const PAGE_LIMIT      = 100;
+const WINDOW_START_YR = 2020;
+const RETRYABLE       = new Set([429, 502, 503, 504]);
+const sleep           = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Date window generator ─────────────────────────────────────────────────────
+
+/**
+ * Generate monthly ISO date windows from startYear-01 through current month.
+ * @returns {Array<{ label: string, start: string, end: string }>}
+ */
+function monthlyWindows() {
+  const windows = [];
+  const now     = new Date();
+  let year  = WINDOW_START_YR;
+  let month = 1;
+
+  while (year < now.getFullYear() || (year === now.getFullYear() && month <= now.getMonth() + 1)) {
+    const start    = new Date(Date.UTC(year, month - 1, 1)).toISOString();
+    const nextMo   = month === 12 ? 1 : month + 1;
+    const nextYr   = month === 12 ? year + 1 : year;
+    const end      = new Date(Date.UTC(nextYr, nextMo - 1, 1)).toISOString();
+    windows.push({ label: `${year}-${String(month).padStart(2, '0')}`, start, end });
+    month = nextMo;
+    year  = nextYr;
+  }
+  return windows;
+}
 
 // ── Checkpoint helpers ────────────────────────────────────────────────────────
 
@@ -85,19 +99,16 @@ function clearCheckpoint() {
 
 // ── Search with retry ─────────────────────────────────────────────────────────
 
-/**
- * @param {Object} client - axios instance
- * @param {string} locationId
- * @param {string} tag - single tag to search for
- * @param {number} page - 1-based page number
- * @returns {Promise<{ contacts: Array, total: number }>}
- */
-async function searchByTag(client, locationId, tag, page, retries = 6) {
+async function searchPage(client, locationId, tag, window, page, retries = 6) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const res = await client.post('/contacts/search', {
         locationId,
-        filters: [{ field: 'tags', operator: 'contains', value: tag }],
+        filters: [
+          { field: 'tags',      operator: 'contains', value: tag },
+          { field: 'dateAdded', operator: 'gte',      value: window.start },
+          { field: 'dateAdded', operator: 'lt',       value: window.end },
+        ],
         pageLimit: PAGE_LIMIT,
         page,
       });
@@ -107,11 +118,11 @@ async function searchByTag(client, locationId, tag, page, retries = 6) {
       const isRetryable = RETRYABLE.has(status) || !status;
       if (isRetryable && attempt < retries) {
         const delay = 2000 * attempt;
-        logger.warn(`GHL ${status ?? 'SSL/network'} on tag=${tag} page=${page} — retry ${attempt}/${retries - 1} in ${delay}ms`);
+        logger.warn(`GHL ${status ?? 'network'} tag=${tag} window=${window.label} page=${page} — retry ${attempt} in ${delay}ms`);
         await sleep(delay);
         continue;
       }
-      throw new Error(`search tag=${tag} page=${page} failed: ${err.message}`);
+      throw new Error(`search tag=${tag} window=${window.label} page=${page} failed: ${err.message}`);
     }
   }
 }
@@ -133,90 +144,95 @@ async function main() {
     },
   });
 
-  console.log(`\n=== GHL Extract — Preview Buyers (POST /contacts/search) ===`);
-  console.log(`  Strategy : per-tag search with page pagination`);
-  console.log(`  Tags     : ${PREVIEW_TAGS.join(', ')}`);
+  const windows = monthlyWindows();
+
+  console.log(`\n=== GHL Extract — Preview Buyers (tag search + monthly date chunks) ===`);
+  console.log(`  Tags     : ${BUYER_TAGS.join(', ')}`);
+  console.log(`  Windows  : ${windows.length} monthly windows (${windows[0].label} → ${windows.at(-1).label})`);
   console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
 
-  // contactMap: id → contact (dedup across tags)
-  const contactMap    = new Map();
-  let completedTags   = [];
-  let tagStats        = {};
+  // contactMap: id → contact  (dedup across all windows and tags)
+  const contactMap   = new Map();
+  let doneWindows    = new Set();
+  let windowStats    = {};
 
   if (RESUME) {
     const cp = loadCheckpoint();
     if (cp) {
       for (const [id, contact] of Object.entries(cp.contacts ?? {})) contactMap.set(id, contact);
-      completedTags = cp.completedTags ?? [];
-      tagStats      = cp.tagStats ?? {};
-      console.log(`  Resumed: ${contactMap.size} contacts loaded, tags done: [${completedTags.join(', ')}]\n`);
+      doneWindows = new Set(cp.doneWindows ?? []);
+      windowStats = cp.windowStats ?? {};
+      console.log(`  Resumed: ${contactMap.size} contacts, ${doneWindows.size} windows already done\n`);
     } else {
       console.log('  No checkpoint found — starting fresh\n');
     }
   }
 
-  logger.info(`extract-pb: start — resume=${RESUME}, already=${contactMap.size}`);
+  logger.info(`extract-pb: start — tags=${BUYER_TAGS}, windows=${windows.length}, resume=${RESUME}, already=${contactMap.size}`);
 
   const startTime = Date.now();
 
-  for (const tag of PREVIEW_TAGS) {
-    if (completedTags.includes(tag)) {
-      console.log(`  [${tag}] — skipped (already done)`);
-      continue;
-    }
+  for (const tag of BUYER_TAGS) {
+    console.log(`\n  Tag: [${tag}]`);
 
-    process.stdout.write(`  [${tag}] fetching...`);
-    let page         = 1;
-    let tagCollected = 0;
-    let total        = null;
+    for (const window of windows) {
+      const key = `${tag}::${window.label}`;
+      if (doneWindows.has(key)) continue;
 
-    while (true) {
-      const { contacts, total: t } = await searchByTag(client, config.ghl.locationId, tag, page);
+      let page          = 1;
+      let windowCount   = 0;
+      let total         = null;
 
-      if (total === null) {
-        total = t;
-        process.stdout.write(` total=${total}\n`);
+      while (true) {
+        const { contacts, total: t } = await searchPage(client, config.ghl.locationId, tag, window, page);
+
+        if (total === null) total = t;
+
+        for (const contact of contacts) {
+          if (!contactMap.has(contact.id)) contactMap.set(contact.id, contact);
+          windowCount++;
+        }
+
+        process.stdout.write(
+          `\r    ${window.label} | page ${page} | window: ${windowCount}/${total} | unique total: ${contactMap.size}  `
+        );
+
+        if (contacts.length < PAGE_LIMIT) break;
+
+        if (page >= 100) {
+          logger.warn(`extract-pb: window ${window.label} hit 100-page cap with ${windowCount} contacts — consider narrower chunks`);
+          break;
+        }
+
+        page++;
+        await sleep(150);
       }
 
-      for (const contact of contacts) {
-        if (!contactMap.has(contact.id)) contactMap.set(contact.id, contact);
-        tagCollected++;
-      }
+      if (total > 0) process.stdout.write('\n');
 
-      process.stdout.write(
-        `\r  [${tag}] page ${page} — tag contacts: ${tagCollected}/${total} | unique total: ${contactMap.size}  `
-      );
+      doneWindows.add(key);
+      windowStats[key] = { total, collected: windowCount };
 
-      if (contacts.length < PAGE_LIMIT) break;
-      page++;
-
-      await sleep(200);
+      saveCheckpoint({
+        doneWindows: [...doneWindows],
+        windowStats,
+        contacts: Object.fromEntries(contactMap),
+      });
     }
-
-    console.log();
-    tagStats[tag] = { total, collected: tagCollected };
-    completedTags.push(tag);
-
-    saveCheckpoint({
-      completedTags,
-      tagStats,
-      contacts: Object.fromEntries(contactMap),
-    });
-
-    logger.info(`extract-pb tag=${tag}: total=${total}, collected=${tagCollected}, unique=${contactMap.size}`);
   }
 
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  const elapsed  = ((Date.now() - startTime) / 1000).toFixed(1);
   const contacts = [...contactMap.values()];
 
   console.log(`\n  Done in ${elapsed}s`);
   console.log(`  Unique contacts collected: ${contacts.length}`);
 
   if (contacts.length === 0) {
-    console.log('  No contacts found. Check tag names and API key.');
+    console.log('  No contacts found. Check tag name and API key.');
     process.exit(0);
   }
 
+  // Build report
   const tagCounts = {};
   for (const c of contacts) {
     for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
@@ -232,9 +248,9 @@ async function main() {
 
   const report = {
     timestamp: new Date().toISOString(),
-    strategy: 'contacts-search-api-per-tag',
-    tags: PREVIEW_TAGS,
-    tagStats,
+    strategy: 'contacts-search-api-monthly-date-chunks',
+    tags: BUYER_TAGS,
+    windowCount: windows.length,
     results: { contactsCollected: contacts.length, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
@@ -250,10 +266,6 @@ async function main() {
   clearCheckpoint();
 
   console.log(`\n=== Summary ===`);
-  console.log(`  Tag breakdown:`);
-  for (const [t, s] of Object.entries(tagStats)) {
-    console.log(`    ${t.padEnd(35)} total=${s.total}  collected=${s.collected}`);
-  }
   console.log(`  Unique contacts : ${contacts.length}`);
   console.log(`  Elapsed         : ${elapsed}s`);
   console.log(`\n  Output : data/samples/preview-buyers.json`);

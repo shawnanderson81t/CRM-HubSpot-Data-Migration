@@ -93,19 +93,23 @@ src/
     └── config.js       # Environment config loader
 ```
 
-## GHL API — CONFIRMED DETAILS (updated May 5, 2026)
+## GHL API — CONFIRMED DETAILS (updated May 19, 2026)
 - **Base URL**: `https://services.leadconnectorhq.com/`
 - **Auth**: GHL Private Integration Token used directly as Bearer — `GHL_API_KEY` in `.env`
 - **Version header**: `Version: 2021-07-28` — required on every request
 - **Single contact**: `GET /contacts/{contactId}`
-- **List contacts**: `GET /contacts/` — cursor-based pagination via `startAfterId`, max 100/page
+- **List contacts**: `GET /contacts/` — cursor-based pagination via `startAfterId`, max 100/page. Hard cap ~100K total (deprecated endpoint — use search API for large extractions)
+- **Search contacts**: `POST /contacts/search` — tag + date filters, `pageLimit` up to 100, `page` number pagination. Caps at 100 pages (10K) per query. Multiple filters = AND. Use monthly date-range chunking for datasets > 10K.
+  - Date filter format: `{ field: 'dateAdded', operator: 'range', value: { gte: 'ISO', lte: 'ISO' } }` — `gte`/`lte` operators don't exist; `from`/`to`, array, and Unix ms formats all return 422
+  - Tag filter: `{ field: 'tags', operator: 'contains', value: 'tag-name' }` — lowercase operator required
 - **Custom fields**: `GET /locations/{locationId}/customFields`
 - **Tags**: `GET /locations/{locationId}/tags`
 - **Pipelines**: `GET /opportunities/pipelines?locationId={id}`
-- **Opportunities**: `GET /opportunities/search?location_id={id}`
+- **Opportunities**: `GET /opportunities/search?location_id={id}` — page-number pagination (not cursor), caps at 100 pages (10K) per status
 - **Total contacts**: 897,917 (confirmed May 5, 2026 via pagination meta)
 - **Total opportunities**: 798,008 (confirmed May 5, 2026)
 - **Env vars needed**: `GHL_API_KEY`, `GHL_LOCATION_ID`, `HUBSPOT_API_KEY`
+- **GHL date field format**: Custom date fields are returned as full ISO datetime strings (`2022-07-22T00:00:00.000Z`), not plain `YYYY-MM-DD` — strip time component before writing to HubSpot
 
 ## TECHNICAL CONSTRAINTS
 - **HubSpot API**: Contacts API v3, batch upsert endpoint (100 contacts/request)
@@ -319,31 +323,31 @@ src/
 >
 > **⚠️ PREVIEW DEALS — NEW SCOPE ITEM (May 15)**: Andy flagged that Preview deals were **never migrated** from Engager to HubSpot. His team won't cover it. We agreed to take it on as a **separate pass after May 22** (post contact migration). Source data is complex: mix of contact fields + tags + opportunities in Engager. Steps: (1) sample Preview opportunities to map extraction logic, (2) build extractor + deal creator, (3) run after Tier 3 contact migration completes. Does NOT affect May 22 target.
 
-### Phase 3 — Tier 1 Migration (May 17, weekend)
-- [ ] Wait for Workshop Buyers re-extraction to complete on remote (~33K, all statuses)
-- [ ] Copy workshop-buyers.json from remote via AnyDesk
-- [ ] Take HubSpot backup export of Workshop Buyer contacts before run
-- [ ] Pause HubSpot workflows (Andy to confirm list)
-- [ ] Confirm lifecyclestage 2107021006 handling with Andy
-- [ ] Andy sign-off → run ~33K Workshop Buyers enrichment via `npm run migrate:tier1`
-- [ ] Automated validation (`node scripts/validate-pilot.js --tier=1 --count=200`)
-- [ ] Manual spot-checks on edge cases
-- [ ] Build guest_of associations for Tier 1
-- [ ] Generate validation report → send to Alex + Brandon/Eddie/Jai/James
+### Phase 3 — Tier 1 Migration (May 17, weekend) ✅ COMPLETE
+- [x] Workshop Buyers re-extracted — all statuses (open/won/lost/abandoned), no tag filter
+- [x] Andy sign-off received
+- [x] Tier 1 migration ran: **17,679 succeeded, 1 failed, 12 skipped**
+- [x] `cancel` tag applied to skipped contacts
+- [x] Report sent to Alex + Andy
 
-### Phase 4 — Tier 2 Migration (May 18–19)
-- [x] `scripts/extract-preview-buyers.js` built — pipeline `yZ49CJBYdHhC0IEIe9Cs`, all 4 statuses, no tag filter
-- [ ] Run `npm run extract:pb` on remote — extract ~30K Preview Buyers → `data/samples/preview-buyers.json`
-- [ ] Pilot Tier 2: `node scripts/pilot-run.js --tier=2 --count=10`
-- [ ] Validate Tier 2 pilot: `node scripts/validate-pilot.js --tier=2 --count=10`
-- [ ] Run Tier 2 migration: `npm run migrate:tier2`
-- [ ] Process cross-tier guest_of associations
-- [ ] Automated validation + dedup report
-- [ ] Tier 2 sign-off report
+### Phase 4 — Tier 2 Migration (May 18–19) ✅ COMPLETE
+- [x] `scripts/extract-preview-buyers.js` rebuilt — new approach: POST /contacts/search + monthly date-range chunking (bypasses GHL's 10K-per-query cap). Tag: `phase-preview-buyer`. Scope confirmed with Andy: 31K only (not full 300K+ preview-tagged contacts).
+- [x] Extraction complete: **31,250 contacts** → `data/samples/preview-buyers.json`
+- [x] **Bug fixed**: `toIsoDate()` in `fieldMapper.js` now handles full ISO datetime strings (`2022-07-22T00:00:00.000Z`) — GHL stores date custom fields in this format. Was silently returning null before fix.
+- [x] Tier 2 pilot: 10/10 PASS, 0 warnings after fix
+- [x] Tier 2 migration ran: **31,224 succeeded, 5 failed, 15 skipped** (~47 min runtime)
+- [x] Report sent to Alex + Andy
+
+**GHL extraction method — key findings (May 18–19):**
+- Pipeline/opportunities approach → 10K cap (GHL 100-page limit per status)
+- GET /contacts/ cursor approach → ~100K hard cap (deprecated endpoint)
+- POST /contacts/search with single tag filter → 10K cap per query
+- **Working solution**: POST /contacts/search + monthly date-range chunking (each window stays well under 10K). Checkpoints after each completed window. Resume-safe.
+- Date filter format: `{ field: 'dateAdded', operator: 'range', value: { gte: isoString, lte: isoString } }` — other formats (from/to, array, Unix ms) return 422.
 
 ### Phase 5 — Tier 3 + Handoff (May 20–22 — Overnight Runs)
-- [x] Tier 3 extraction strategy: contacts API cursor-based pagination, exclude `hs_transfer`/`hs-to-hl` tags
-- [x] `scripts/extract-registrants.js` built — `npm run extract:reg:sample` (100 contacts) / `npm run extract:reg` (full 900K cap)
+- [x] Tier 3 extraction strategy: GET /contacts/ cursor-based pagination, exclude `hs_transfer`/`hs-to-hl` tags
+- [x] `scripts/extract-registrants.js` built — `npm run extract:reg:sample` (100 contacts) / `npm run extract:reg` (full 900K cap). Checkpoints every 500 contacts. Resume-safe.
 - [ ] Run `npm run extract:reg:sample` on remote — 100 contacts for Tier 3 pilot
 - [ ] Pilot Tier 3: `node scripts/pilot-run.js --tier=3 --count=10`
 - [ ] Validate Tier 3 pilot: `node scripts/validate-pilot.js --tier=3 --count=10`
@@ -384,9 +388,9 @@ Andy confirmed (May 15) his team will keep Preview deal backfill in their own co
 | May 14 (Wed) | Day 9 | Apply property renames (engager_contact_id, utm_source/medium) · Build load module (hubspotClient, batchUpserter, checkpoint, rateLimiter) · Build migrate-tier.js · Add contact owner lookup · Sandbox prep | ✅ Complete |
 | May 15 (Thu) | Day 10 | PROD pilot: 10/10 succeeded · Validation: 7/10 PASS · Extract: 1,834 WBs confirmed · Andy review scheduled weekend | ✅ Complete |
 | May 16 (Fri) | Day 11 | Build Tier 2 extractor (extract-preview-buyers.js) · Build Tier 3 extractor (extract-registrants.js) · Generalize pilot-run.js + validate-pilot.js for all tiers · Fix SSL/429/400 retries in extract-wb · Remove tag filter + add all statuses to extract-wb · Re-extract WBs (~33K) in progress on remote | ✅ Complete |
-| May 17 (Sat) | Day 12 | Andy sign-off · Tier 1 run: 1,834 Workshop Buyers · Validation · guest_of associations · Report | ⬜ Pending |
-| May 18 (Sun) | Day 13 | Tier 2 extract + run: ~30K Preview Buyers | ⬜ Pending |
-| May 19 (Mon) | Day 14 | Tier 2 complete · Validation · Report to Alex + Brandon/Eddie/Jai/James | ⬜ Pending |
+| May 17 (Sat) | Day 12 | Tier 1 re-run: 17,679 succeeded, 1 failed, 12 skipped · Report sent | ✅ Complete |
+| May 18 (Sun) | Day 13 | Tier 2 extract (31,250 contacts, new monthly-chunk method) · toIsoDate bug fixed · Pilot 10/10 PASS | ✅ Complete |
+| May 19 (Mon) | Day 14 | Tier 2 migration: 31,224 succeeded, 5 failed, 15 skipped (~47 min) · Report sent · Tier 3 script ready | ✅ Complete |
 | May 20 (Tue) | Day 15 | Tier 3 start: 800K overnight batch run begins | ⬜ Pending |
 | May 21 (Wed) | Day 16 | Tier 3 overnight run completes · Monitor · Fix failures | ⬜ Pending |
 | May 22 (Thu) | Day 17 | Final QA: count reconciliation, dedup scan, field completeness · Final report · Handoff | ⬜ Pending |

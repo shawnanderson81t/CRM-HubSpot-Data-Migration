@@ -312,6 +312,8 @@ function toIsoDate(v) {
   if (typeof v === 'number') return new Date(v).toISOString().split('T')[0];
   const s = String(v).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Full ISO datetime string (GHL stores dates as "YYYY-MM-DDTHH:mm:ss.sssZ")
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.split('T')[0];
   const mmddyyyy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (mmddyyyy) {
     const [, m, d, y] = mmddyyyy;

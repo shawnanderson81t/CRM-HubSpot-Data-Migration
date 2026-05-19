@@ -30,28 +30,64 @@ const PREVIEW_TAGS = [
 async function run() {
   const locationId = config.ghl.locationId;
 
-  // Count per tag (1 contact fetch each — just need the total field)
-  console.log('\nTag counts (total contacts per preview tag):');
-  console.log('─'.repeat(55));
-  let grandTotal = 0;
-  for (const tag of PREVIEW_TAGS) {
+  const TAG = 'phase-preview-buyer';
+  const isoStart = '2024-01-01T00:00:00.000Z';
+  const isoEnd   = '2024-04-01T00:00:00.000Z';
+  const tsStart  = new Date(isoStart).getTime();
+  const tsEnd    = new Date(isoEnd).getTime();
+
+  async function tryFilter(label, filters) {
     try {
       const res = await client.post('/contacts/search', {
         locationId,
-        filters: [{ field: 'tags', operator: 'contains', value: tag }],
+        filters,
         pageLimit: 1,
         page: 1,
       });
-      const total = res.data?.total ?? '?';
-      grandTotal += typeof total === 'number' ? total : 0;
-      console.log(`  ${tag.padEnd(35)} ${String(total).padStart(8)}`);
+      console.log(`  ${label}: OK — total=${res.data?.total}, contacts=${(res.data?.contacts ?? []).length}`);
+      if (res.data?.contacts?.[0]) {
+        console.log(`    dateAdded=${res.data.contacts[0].dateAdded}`);
+      }
     } catch (err) {
-      console.log(`  ${tag.padEnd(35)} FAILED: ${err.response?.status}`);
+      console.log(`  ${label}: FAILED ${err.response?.status} — ${JSON.stringify(err.response?.data?.message)}`);
     }
   }
-  console.log('─'.repeat(55));
-  console.log(`  ${'TOTAL (with overlap)'.padEnd(35)} ${String(grandTotal).padStart(8)}`);
-  console.log('\nNote: contacts can have multiple tags so unique count will be less than total above.');
+
+  // Test various date field names and value formats
+  await tryFilter('gte/lt ISO, field=dateAdded', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'gte',      value: isoStart },
+    { field: 'dateAdded', operator: 'lt',       value: isoEnd },
+  ]);
+
+  await tryFilter('gte/lt Unix ms, field=dateAdded', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'gte',      value: tsStart },
+    { field: 'dateAdded', operator: 'lt',       value: tsEnd },
+  ]);
+
+  await tryFilter('range operator, field=dateAdded', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'dateAdded', operator: 'range',    value: `${isoStart},${isoEnd}` },
+  ]);
+
+  await tryFilter('gte/lt ISO, field=date_added', [
+    { field: 'tags',       operator: 'contains', value: TAG },
+    { field: 'date_added', operator: 'gte',      value: isoStart },
+    { field: 'date_added', operator: 'lt',       value: isoEnd },
+  ]);
+
+  await tryFilter('gte/lt ISO, field=createdAt', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'createdAt', operator: 'gte',      value: isoStart },
+    { field: 'createdAt', operator: 'lt',       value: isoEnd },
+  ]);
+
+  await tryFilter('gte/lt Unix ms, field=createdAt', [
+    { field: 'tags',      operator: 'contains', value: TAG },
+    { field: 'createdAt', operator: 'gte',      value: tsStart },
+    { field: 'createdAt', operator: 'lt',       value: tsEnd },
+  ]);
 }
 
 run().catch(err => {

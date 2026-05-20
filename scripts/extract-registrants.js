@@ -86,12 +86,15 @@ function weeklyWindows() {
 // ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 /**
- * Save only window metadata — contacts live in the NDJSON file.
+ * Save window metadata + current seenIds array to checkpoint JSON.
+ * 850K IDs × ~20 chars = ~17MB — safe to JSON.stringify/parse.
+ * Storing IDs here means resume never needs to read the large NDJSON file.
  * @param {{ doneWindows: string[], windowStats: object, cappedWindows: string[] }} meta
+ * @param {Set<string>} seenIds
  */
-function saveCheckpoint(meta) {
+function saveCheckpoint(meta, seenIds) {
   mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  writeFileSync(CP_FILE, JSON.stringify(meta));
+  writeFileSync(CP_FILE, JSON.stringify({ ...meta, seenIds: [...seenIds] }));
 }
 
 /**
@@ -106,27 +109,32 @@ function appendWindowContacts(newContacts) {
 }
 
 /**
- * Load checkpoint metadata and rebuild seenIds from NDJSON via streaming readline.
- * Only IDs are extracted — contact objects are never fully parsed into RAM.
- * @returns {Promise<{ meta: object, seenIds: Set<string>, contactCount: number } | null>}
+ * Load checkpoint. Reads seenIds from the JSON checkpoint if present (fast, ~17MB).
+ * Falls back to streaming NDJSON if seenIds missing (backward compat — needs more heap).
+ * @returns {Promise<{ meta: object, seenIds: Set<string> } | null>}
  */
 async function loadCheckpoint() {
   if (!existsSync(CP_FILE)) return null;
   try {
-    const meta    = JSON.parse(readFileSync(CP_FILE, 'utf-8'));
-    const seenIds = new Set();
+    const meta = JSON.parse(readFileSync(CP_FILE, 'utf-8'));
 
+    // Fast path: seenIds stored in checkpoint JSON (new format)
+    if (Array.isArray(meta.seenIds)) {
+      return { meta, seenIds: new Set(meta.seenIds) };
+    }
+
+    // Slow path: backward compat — extract IDs from NDJSON via streaming readline
+    const seenIds = new Set();
     if (existsSync(CP_CONTACTS)) {
+      console.log('  (one-time: rebuilding ID index from NDJSON checkpoint — may take a minute)');
       const rl = createInterface({ input: createReadStream(CP_CONTACTS), crlfDelay: Infinity });
       for await (const line of rl) {
         if (!line.trim()) continue;
-        // Extract id without full JSON.parse to minimize memory pressure
         const m = line.match(/"id"\s*:\s*"([^"]+)"/);
         if (m) seenIds.add(m[1]);
       }
     }
-
-    return { meta, seenIds, contactCount: seenIds.size };
+    return { meta, seenIds };
   } catch { return null; }
 }
 
@@ -326,7 +334,7 @@ async function main() {
     windowStats[window.label] = { total, collected: windowCount, capped: hitCap };
 
     appendWindowContacts(newContacts);
-    saveCheckpoint({ doneWindows: [...doneWindows], windowStats, cappedWindows });
+    saveCheckpoint({ doneWindows: [...doneWindows], windowStats, cappedWindows }, seenIds);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

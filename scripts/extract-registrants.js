@@ -5,14 +5,15 @@
  * With ~895K contacts across ~6 years, monthly windows average ~11K — too large.
  * Weekly windows average ~2,500, keeping every window safely under the 10K cap.
  *
- * No tag filter — extracts all contacts by dateAdded range.
- * Contacts already migrated in Tier 1/2 will be safely re-upserted (setIfPresent
- * in fieldMapper ensures no good data is overwritten with blanks).
+ * Memory design:
+ *   Only contact IDs are held in memory (Set<string>, ~50MB for 850K contacts).
+ *   Contact objects are written immediately to an NDJSON file and never stored in RAM.
+ *   Final registrants.json is stream-converted from NDJSON — no full-set stringify.
  *
  * Checkpoint design:
- *   - extract-reg.json          — small metadata (doneWindows, windowStats, cappedWindows)
- *   - extract-reg-contacts.ndjson — one contact per line, append-only per window
- *   This avoids JSON.stringify of the full contact set on every checkpoint save.
+ *   - extract-reg.json           — small metadata (doneWindows, windowStats, cappedWindows)
+ *   - extract-reg-contacts.ndjson — one contact per line, append-only
+ *   Resume reads IDs from NDJSON via streaming readline (no heap pressure).
  *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
@@ -27,15 +28,16 @@
  *   npm run extract:reg:resume
  *
  * Output:
- *   data/samples/registrants.json             — contact records
+ *   data/samples/registrants.json             — contact records (JSON array)
  *   data/reports/extract-reg-[ts].json        — run report
  */
 
 import dotenv from 'dotenv';
 import {
   writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync,
-  appendFileSync, createWriteStream,
+  appendFileSync, createWriteStream, createReadStream,
 } from 'fs';
+import { createInterface } from 'readline';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig } from '../src/utils/config.js';
@@ -94,6 +96,7 @@ function saveCheckpoint(meta) {
 
 /**
  * Append new unique contacts from a completed window to the NDJSON file.
+ * Each contact is one line — no full-set stringify ever happens.
  * @param {object[]} newContacts
  */
 function appendWindowContacts(newContacts) {
@@ -103,17 +106,27 @@ function appendWindowContacts(newContacts) {
 }
 
 /**
- * Load checkpoint metadata + rebuild contactMap from NDJSON.
- * @returns {{ doneWindows: string[], windowStats: object, cappedWindows: string[], contacts: object[] } | null}
+ * Load checkpoint metadata and rebuild seenIds from NDJSON via streaming readline.
+ * Only IDs are extracted — contact objects are never fully parsed into RAM.
+ * @returns {Promise<{ meta: object, seenIds: Set<string>, contactCount: number } | null>}
  */
-function loadCheckpoint() {
+async function loadCheckpoint() {
   if (!existsSync(CP_FILE)) return null;
   try {
-    const meta     = JSON.parse(readFileSync(CP_FILE, 'utf-8'));
-    const contacts = existsSync(CP_CONTACTS)
-      ? readFileSync(CP_CONTACTS, 'utf-8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
-      : [];
-    return { ...meta, contacts };
+    const meta    = JSON.parse(readFileSync(CP_FILE, 'utf-8'));
+    const seenIds = new Set();
+
+    if (existsSync(CP_CONTACTS)) {
+      const rl = createInterface({ input: createReadStream(CP_CONTACTS), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        // Extract id without full JSON.parse to minimize memory pressure
+        const m = line.match(/"id"\s*:\s*"([^"]+)"/);
+        if (m) seenIds.add(m[1]);
+      }
+    }
+
+    return { meta, seenIds, contactCount: seenIds.size };
   } catch { return null; }
 }
 
@@ -159,28 +172,64 @@ async function searchPage(client, locationId, window, page, retries = 6) {
   }
 }
 
-// ── Stream-write JSON array to avoid in-memory stringify of 800K objects ──────
+// ── Stream NDJSON → JSON array ────────────────────────────────────────────────
 
 /**
- * Write contactMap values to a JSON array file without ever stringifying all at once.
- * @param {Map<string, object>} contactMap
- * @param {string} filePath
- * @returns {Promise<void>}
+ * Convert the NDJSON contacts file into a valid JSON array using streaming.
+ * Reads line-by-line — no full file loaded into RAM.
+ * @param {string} ndjsonPath
+ * @param {string} outputPath
+ * @returns {Promise<number>} Number of contacts written
  */
-function writeContactsFile(contactMap, filePath) {
-  return new Promise((resolve, reject) => {
-    mkdirSync(dirname(filePath), { recursive: true });
-    const ws = createWriteStream(filePath);
-    ws.write('[\n');
-    let first = true;
-    for (const contact of contactMap.values()) {
-      if (!first) ws.write(',\n');
-      ws.write(JSON.stringify(contact));
-      first = false;
+async function ndjsonToJsonArray(ndjsonPath, outputPath) {
+  mkdirSync(dirname(outputPath), { recursive: true });
+  const ws  = createWriteStream(outputPath);
+  const rl  = createInterface({ input: createReadStream(ndjsonPath), crlfDelay: Infinity });
+  let first = true;
+  let count = 0;
+
+  ws.write('[\n');
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    if (!first) ws.write(',\n');
+    ws.write(line);
+    first = false;
+    count++;
+  }
+  ws.write('\n]\n');
+  await new Promise((resolve, reject) => ws.end(err => err ? reject(err) : resolve()));
+  return count;
+}
+
+// ── Build tag counts from NDJSON without loading all contacts into RAM ────────
+
+/**
+ * Stream NDJSON to build tag frequency map and collect sample contacts.
+ * @param {string} ndjsonPath
+ * @returns {Promise<{ topTags: object[], sample: object[] }>}
+ */
+async function buildReportData(ndjsonPath) {
+  const tagCounts = {};
+  const sample    = [];
+  const rl        = createInterface({ input: createReadStream(ndjsonPath), crlfDelay: Infinity });
+
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    const c = JSON.parse(line);
+    for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
+    if (sample.length < 5) {
+      sample.push({
+        id:   c.id,
+        name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
+        tags: (c.tags ?? []).slice(0, 5),
+      });
     }
-    ws.write('\n]\n');
-    ws.end(err => err ? reject(err) : resolve());
-  });
+  }
+
+  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30)
+    .map(([tag, count]) => ({ tag, count }));
+
+  return { topTags, sample };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -206,35 +255,38 @@ async function main() {
   console.log(`  Windows  : ${windows.length} weekly windows (${windows[0].label} → ${windows.at(-1).label})`);
   console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
 
-  const contactMap   = new Map();
+  // Only IDs in memory — contact objects live in the NDJSON file
+  const seenIds      = new Set();
   let doneWindows    = new Set();
   let windowStats    = {};
   let cappedWindows  = [];
+  let totalUnique    = 0;
 
   if (RESUME) {
-    const cp = loadCheckpoint();
+    const cp = await loadCheckpoint();
     if (cp) {
-      for (const contact of cp.contacts) contactMap.set(contact.id, contact);
-      doneWindows   = new Set(cp.doneWindows ?? []);
-      windowStats   = cp.windowStats ?? {};
-      cappedWindows = cp.cappedWindows ?? [];
-      console.log(`  Resumed: ${contactMap.size} contacts, ${doneWindows.size} windows already done\n`);
+      cp.seenIds.forEach(id => seenIds.add(id));
+      doneWindows   = new Set(cp.meta.doneWindows ?? []);
+      windowStats   = cp.meta.windowStats ?? {};
+      cappedWindows = cp.meta.cappedWindows ?? [];
+      totalUnique   = seenIds.size;
+      console.log(`  Resumed: ${totalUnique} contacts, ${doneWindows.size} windows already done\n`);
     } else {
       console.log('  No checkpoint found — starting fresh\n');
     }
   }
 
-  logger.info(`extract-reg: start — windows=${windows.length}, resume=${RESUME}, already=${contactMap.size}`);
+  logger.info(`extract-reg: start — windows=${windows.length}, resume=${RESUME}, already=${totalUnique}`);
 
   const startTime = Date.now();
 
   for (const window of windows) {
     if (doneWindows.has(window.label)) continue;
 
-    let page        = 1;
-    let windowCount = 0;
-    let total       = null;
-    let hitCap      = false;
+    let page          = 1;
+    let windowCount   = 0;
+    let total         = null;
+    let hitCap        = false;
     const newContacts = [];
 
     while (true) {
@@ -243,15 +295,16 @@ async function main() {
       if (total === null) total = t;
 
       for (const contact of contacts) {
-        if (!contactMap.has(contact.id)) {
-          contactMap.set(contact.id, contact);
+        if (!seenIds.has(contact.id)) {
+          seenIds.add(contact.id);
           newContacts.push(contact);
+          totalUnique++;
         }
         windowCount++;
       }
 
       process.stdout.write(
-        `\r  ${window.label} | page ${page} | window: ${windowCount}/${total ?? '?'} | unique total: ${contactMap.size}  `
+        `\r  ${window.label} | page ${page} | window: ${windowCount}/${total ?? '?'} | unique total: ${totalUnique}  `
       );
 
       if (contacts.length < PAGE_LIMIT) break;
@@ -272,7 +325,6 @@ async function main() {
     doneWindows.add(window.label);
     windowStats[window.label] = { total, collected: windowCount, capped: hitCap };
 
-    // Append only the new contacts from this window — never stringify the whole map
     appendWindowContacts(newContacts);
     saveCheckpoint({ doneWindows: [...doneWindows], windowStats, cappedWindows });
   }
@@ -280,47 +332,35 @@ async function main() {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
   console.log(`\n  Done in ${elapsed}s`);
-  console.log(`  Unique contacts collected: ${contactMap.size}`);
+  console.log(`  Unique contacts collected: ${totalUnique}`);
 
   if (cappedWindows.length > 0) {
     console.log(`\n  ⚠ WARNING: ${cappedWindows.length} weekly window(s) hit the 10K cap — contacts in those weeks may be incomplete:`);
     for (const w of cappedWindows) console.log(`    - ${w}`);
-    console.log(`  Consider re-running those windows with daily sub-chunking.`);
   }
 
-  if (contactMap.size === 0) {
+  if (totalUnique === 0) {
     console.log('  No contacts found. Check API key and location ID.');
     process.exit(0);
   }
 
-  // Build report from tag counts (stream through map — no full stringify)
-  const tagCounts = {};
-  for (const c of contactMap.values()) {
-    for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
-  }
-  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30)
-    .map(([tag, count]) => ({ tag, count }));
-
-  const sampleContacts = [...contactMap.values()].slice(0, 5);
-  const sample = sampleContacts.map(c => ({
-    id: c.id,
-    name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
-    tags: (c.tags ?? []).slice(0, 5),
-  }));
+  // Build report data by streaming NDJSON — no in-memory contact objects
+  console.log('  Building report...');
+  const { topTags, sample } = await buildReportData(CP_CONTACTS);
 
   const report = {
     timestamp: new Date().toISOString(),
     strategy: 'contacts-search-api-weekly-date-chunks',
     windowCount: windows.length,
     cappedWindows,
-    results: { contactsCollected: contactMap.size, elapsedSeconds: parseFloat(elapsed) },
+    results: { contactsCollected: totalUnique, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
   };
 
-  // Stream-write contacts to avoid in-memory stringify of 800K+ objects
+  // Stream-convert NDJSON → JSON array
   console.log('  Writing registrants.json...');
-  await writeContactsFile(contactMap, join(SAMPLES_DIR, 'registrants.json'));
+  const written = await ndjsonToJsonArray(CP_CONTACTS, join(SAMPLES_DIR, 'registrants.json'));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -329,7 +369,7 @@ async function main() {
   clearCheckpoint();
 
   console.log(`\n=== Summary ===`);
-  console.log(`  Unique contacts : ${contactMap.size}`);
+  console.log(`  Unique contacts : ${written}`);
   console.log(`  Windows scanned : ${windows.length}`);
   console.log(`  Capped windows  : ${cappedWindows.length}`);
   console.log(`  Elapsed         : ${elapsed}s`);
@@ -341,7 +381,7 @@ async function main() {
     for (const s of sample) console.log(`    ${s.id}  ${s.name.padEnd(30)}  ${s.tags.join(', ')}`);
   }
 
-  logger.info('extract-registrants complete', { collected: contactMap.size, elapsed, cappedWindows: cappedWindows.length });
+  logger.info('extract-registrants complete', { collected: written, elapsed, cappedWindows: cappedWindows.length });
 }
 
 main().catch(err => {

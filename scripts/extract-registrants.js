@@ -9,6 +9,11 @@
  * Contacts already migrated in Tier 1/2 will be safely re-upserted (setIfPresent
  * in fieldMapper ensures no good data is overwritten with blanks).
  *
+ * Checkpoint design:
+ *   - extract-reg.json          — small metadata (doneWindows, windowStats, cappedWindows)
+ *   - extract-reg-contacts.ndjson — one contact per line, append-only per window
+ *   This avoids JSON.stringify of the full contact set on every checkpoint save.
+ *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
  *   - Checkpoints after each completed week — resume skips done windows
@@ -27,7 +32,10 @@
  */
 
 import dotenv from 'dotenv';
-import { writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import {
+  writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync,
+  appendFileSync, createWriteStream,
+} from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig } from '../src/utils/config.js';
@@ -41,6 +49,7 @@ const SAMPLES_DIR     = join(__dirname, '../data/samples');
 const REPORTS_DIR     = join(__dirname, '../data/reports');
 const CHECKPOINTS_DIR = join(__dirname, '../data/checkpoints');
 const CP_FILE         = join(CHECKPOINTS_DIR, 'extract-reg.json');
+const CP_CONTACTS     = join(CHECKPOINTS_DIR, 'extract-reg-contacts.ndjson');
 
 const RESUME = process.argv.includes('--resume');
 
@@ -53,7 +62,6 @@ const sleep           = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * Generate weekly ISO date windows from startYear-01-01 through today.
- * Weekly chunks keep each window well under GHL's 10K-per-query cap.
  * @returns {Array<{ label: string, gte: string, lte: string }>}
  */
 function weeklyWindows() {
@@ -76,20 +84,42 @@ function weeklyWindows() {
 // ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 /**
- * @param {{ doneWindows: string[], windowStats: object, cappedWindows: string[], contacts: object }} state
+ * Save only window metadata — contacts live in the NDJSON file.
+ * @param {{ doneWindows: string[], windowStats: object, cappedWindows: string[] }} meta
  */
-function saveCheckpoint(state) {
+function saveCheckpoint(meta) {
   mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  writeFileSync(CP_FILE, JSON.stringify(state));
+  writeFileSync(CP_FILE, JSON.stringify(meta));
 }
 
+/**
+ * Append new unique contacts from a completed window to the NDJSON file.
+ * @param {object[]} newContacts
+ */
+function appendWindowContacts(newContacts) {
+  if (newContacts.length === 0) return;
+  mkdirSync(CHECKPOINTS_DIR, { recursive: true });
+  appendFileSync(CP_CONTACTS, newContacts.map(c => JSON.stringify(c)).join('\n') + '\n');
+}
+
+/**
+ * Load checkpoint metadata + rebuild contactMap from NDJSON.
+ * @returns {{ doneWindows: string[], windowStats: object, cappedWindows: string[], contacts: object[] } | null}
+ */
 function loadCheckpoint() {
   if (!existsSync(CP_FILE)) return null;
-  try { return JSON.parse(readFileSync(CP_FILE, 'utf-8')); } catch { return null; }
+  try {
+    const meta     = JSON.parse(readFileSync(CP_FILE, 'utf-8'));
+    const contacts = existsSync(CP_CONTACTS)
+      ? readFileSync(CP_CONTACTS, 'utf-8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+      : [];
+    return { ...meta, contacts };
+  } catch { return null; }
 }
 
 function clearCheckpoint() {
   try { unlinkSync(CP_FILE); } catch {}
+  try { unlinkSync(CP_CONTACTS); } catch {}
 }
 
 // ── Search with retry ─────────────────────────────────────────────────────────
@@ -129,6 +159,30 @@ async function searchPage(client, locationId, window, page, retries = 6) {
   }
 }
 
+// ── Stream-write JSON array to avoid in-memory stringify of 800K objects ──────
+
+/**
+ * Write contactMap values to a JSON array file without ever stringifying all at once.
+ * @param {Map<string, object>} contactMap
+ * @param {string} filePath
+ * @returns {Promise<void>}
+ */
+function writeContactsFile(contactMap, filePath) {
+  return new Promise((resolve, reject) => {
+    mkdirSync(dirname(filePath), { recursive: true });
+    const ws = createWriteStream(filePath);
+    ws.write('[\n');
+    let first = true;
+    for (const contact of contactMap.values()) {
+      if (!first) ws.write(',\n');
+      ws.write(JSON.stringify(contact));
+      first = false;
+    }
+    ws.write('\n]\n');
+    ws.end(err => err ? reject(err) : resolve());
+  });
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -160,7 +214,7 @@ async function main() {
   if (RESUME) {
     const cp = loadCheckpoint();
     if (cp) {
-      for (const [id, contact] of Object.entries(cp.contacts ?? {})) contactMap.set(id, contact);
+      for (const contact of cp.contacts) contactMap.set(contact.id, contact);
       doneWindows   = new Set(cp.doneWindows ?? []);
       windowStats   = cp.windowStats ?? {};
       cappedWindows = cp.cappedWindows ?? [];
@@ -181,6 +235,7 @@ async function main() {
     let windowCount = 0;
     let total       = null;
     let hitCap      = false;
+    const newContacts = [];
 
     while (true) {
       const { contacts, total: t } = await searchPage(client, config.ghl.locationId, window, page);
@@ -188,7 +243,10 @@ async function main() {
       if (total === null) total = t;
 
       for (const contact of contacts) {
-        if (!contactMap.has(contact.id)) contactMap.set(contact.id, contact);
+        if (!contactMap.has(contact.id)) {
+          contactMap.set(contact.id, contact);
+          newContacts.push(contact);
+        }
         windowCount++;
       }
 
@@ -214,19 +272,15 @@ async function main() {
     doneWindows.add(window.label);
     windowStats[window.label] = { total, collected: windowCount, capped: hitCap };
 
-    saveCheckpoint({
-      doneWindows:  [...doneWindows],
-      windowStats,
-      cappedWindows,
-      contacts:     Object.fromEntries(contactMap),
-    });
+    // Append only the new contacts from this window — never stringify the whole map
+    appendWindowContacts(newContacts);
+    saveCheckpoint({ doneWindows: [...doneWindows], windowStats, cappedWindows });
   }
 
-  const elapsed  = ((Date.now() - startTime) / 1000).toFixed(1);
-  const contacts = [...contactMap.values()];
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
   console.log(`\n  Done in ${elapsed}s`);
-  console.log(`  Unique contacts collected: ${contacts.length}`);
+  console.log(`  Unique contacts collected: ${contactMap.size}`);
 
   if (cappedWindows.length > 0) {
     console.log(`\n  ⚠ WARNING: ${cappedWindows.length} weekly window(s) hit the 10K cap — contacts in those weeks may be incomplete:`);
@@ -234,20 +288,21 @@ async function main() {
     console.log(`  Consider re-running those windows with daily sub-chunking.`);
   }
 
-  if (contacts.length === 0) {
+  if (contactMap.size === 0) {
     console.log('  No contacts found. Check API key and location ID.');
     process.exit(0);
   }
 
-  // Build report
+  // Build report from tag counts (stream through map — no full stringify)
   const tagCounts = {};
-  for (const c of contacts) {
+  for (const c of contactMap.values()) {
     for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
   }
   const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30)
     .map(([tag, count]) => ({ tag, count }));
 
-  const sample = contacts.slice(0, 5).map(c => ({
+  const sampleContacts = [...contactMap.values()].slice(0, 5);
+  const sample = sampleContacts.map(c => ({
     id: c.id,
     name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
     tags: (c.tags ?? []).slice(0, 5),
@@ -258,13 +313,14 @@ async function main() {
     strategy: 'contacts-search-api-weekly-date-chunks',
     windowCount: windows.length,
     cappedWindows,
-    results: { contactsCollected: contacts.length, elapsedSeconds: parseFloat(elapsed) },
+    results: { contactsCollected: contactMap.size, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
   };
 
-  mkdirSync(SAMPLES_DIR, { recursive: true });
-  writeFileSync(join(SAMPLES_DIR, 'registrants.json'), JSON.stringify(contacts, null, 2));
+  // Stream-write contacts to avoid in-memory stringify of 800K+ objects
+  console.log('  Writing registrants.json...');
+  await writeContactsFile(contactMap, join(SAMPLES_DIR, 'registrants.json'));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -273,7 +329,7 @@ async function main() {
   clearCheckpoint();
 
   console.log(`\n=== Summary ===`);
-  console.log(`  Unique contacts : ${contacts.length}`);
+  console.log(`  Unique contacts : ${contactMap.size}`);
   console.log(`  Windows scanned : ${windows.length}`);
   console.log(`  Capped windows  : ${cappedWindows.length}`);
   console.log(`  Elapsed         : ${elapsed}s`);
@@ -285,7 +341,7 @@ async function main() {
     for (const s of sample) console.log(`    ${s.id}  ${s.name.padEnd(30)}  ${s.tags.join(', ')}`);
   }
 
-  logger.info('extract-registrants complete', { collected: contacts.length, elapsed, cappedWindows: cappedWindows.length });
+  logger.info('extract-registrants complete', { collected: contactMap.size, elapsed, cappedWindows: cappedWindows.length });
 }
 
 main().catch(err => {

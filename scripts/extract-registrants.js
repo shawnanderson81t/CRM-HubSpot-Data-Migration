@@ -191,21 +191,30 @@ async function searchPage(client, locationId, window, page, retries = 6) {
  */
 async function ndjsonToJsonArray(ndjsonPath, outputPath) {
   mkdirSync(dirname(outputPath), { recursive: true });
-  const ws  = createWriteStream(outputPath);
-  const rl  = createInterface({ input: createReadStream(ndjsonPath), crlfDelay: Infinity });
-  let first = true;
-  let count = 0;
+  const ws      = createWriteStream(outputPath);
+  const rl      = createInterface({ input: createReadStream(ndjsonPath), crlfDelay: Infinity });
+  let first     = true;
+  let count     = 0;
+  let corrupted = 0;
 
   ws.write('[\n');
   for await (const line of rl) {
     if (!line.trim()) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      corrupted++;
+      continue; // skip lines corrupted by previous OOM crash
+    }
     if (!first) ws.write(',\n');
-    ws.write(line);
+    ws.write(JSON.stringify(parsed));
     first = false;
     count++;
   }
   ws.write('\n]\n');
   await new Promise((resolve, reject) => ws.end(err => err ? reject(err) : resolve()));
+  if (corrupted > 0) logger.warn(`ndjsonToJsonArray: skipped ${corrupted} corrupted lines`);
   return count;
 }
 
@@ -223,7 +232,8 @@ async function buildReportData(ndjsonPath) {
 
   for await (const line of rl) {
     if (!line.trim()) continue;
-    const c = JSON.parse(line);
+    let c;
+    try { c = JSON.parse(line); } catch { continue; } // skip corrupted lines
     for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
     if (sample.length < 5) {
       sample.push({

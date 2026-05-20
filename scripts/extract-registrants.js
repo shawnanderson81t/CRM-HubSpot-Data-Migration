@@ -1,36 +1,33 @@
 /**
- * Extract General Registrants from GHL via the contacts API.
+ * Extract all GHL registrants (Tier 3) via POST /contacts/search with weekly date-range chunking.
  *
- * Strategy: unlike Tiers 1 & 2 (pipeline-based), Tier 3 uses direct contact
- * list pagination (cursor-based via startAfterId). Contacts are filtered in
- * memory — hs-to-hl import contacts (tagged hs_transfer or hs-to-hl_temp_*)
- * are excluded since they are HubSpot→GHL syncs, not real registrants.
+ * Strategy: GHL's search API caps at 100 pages (10,000 contacts) per query.
+ * With ~895K contacts across ~6 years, monthly windows average ~11K — too large.
+ * Weekly windows average ~2,500, keeping every window safely under the 10K cap.
  *
- * GHL returns contacts newest-first. The first ~134K records are hs-to-hl
- * imports — they get skipped quickly by the tag filter.
+ * No tag filter — extracts all contacts by dateAdded range.
+ * Contacts already migrated in Tier 1/2 will be safely re-upserted (setIfPresent
+ * in fieldMapper ensures no good data is overwritten with blanks).
  *
  * Resilience:
  *   - Retries 429, 502, 503, 504, SSL/network errors with exponential backoff
- *   - Checkpoints every 500 contacts to data/checkpoints/extract-reg.*
- *   - --resume flag resumes from last checkpoint — no data lost on crash
- *   - Critical for overnight 800K run: a crash resumes in seconds, not hours
+ *   - Checkpoints after each completed week — resume skips done windows
+ *   - --resume flag loads checkpoint and continues
+ *   - Warns if any weekly window hits the 100-page cap (needs daily sub-chunking)
  *
  * Usage:
- *   node scripts/extract-registrants.js               # full run (default 900K cap)
- *   node scripts/extract-registrants.js --count=100   # sample for pilot
- *   node scripts/extract-registrants.js --resume      # resume after crash
+ *   node scripts/extract-registrants.js
+ *   node scripts/extract-registrants.js --resume
  *   npm run extract:reg
- *   npm run extract:reg:sample
  *   npm run extract:reg:resume
  *
  * Output:
- *   --count=100  → data/samples/registrants-sample.json  (pilot use)
- *   full run     → data/samples/registrants.json          (Tier 3 migration)
- *   data/reports/extract-reg-[ts].json                   — run report
+ *   data/samples/registrants.json             — contact records
+ *   data/reports/extract-reg-[ts].json        — run report
  */
 
 import dotenv from 'dotenv';
-import { writeFileSync, readFileSync, mkdirSync, appendFileSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig } from '../src/utils/config.js';
@@ -43,65 +40,99 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLES_DIR     = join(__dirname, '../data/samples');
 const REPORTS_DIR     = join(__dirname, '../data/reports');
 const CHECKPOINTS_DIR = join(__dirname, '../data/checkpoints');
-const CP_POS_FILE     = join(CHECKPOINTS_DIR, 'extract-reg.json');
-const CP_DATA_FILE    = join(CHECKPOINTS_DIR, 'extract-reg-contacts.ndjson');
+const CP_FILE         = join(CHECKPOINTS_DIR, 'extract-reg.json');
 
-const TARGET_COUNT     = parseInt(process.argv.find(a => a.startsWith('--count='))?.split('=')[1] || '900000');
-const RESUME           = process.argv.includes('--resume');
-const CHECKPOINT_EVERY = 500;
+const RESUME = process.argv.includes('--resume');
 
-// Contacts with these tags are HubSpot→GHL syncs — not real registrants
-const EXCLUDE_TAG_PREFIXES = ['hs-to-hl', 'hs_transfer'];
-const isSyncContact = tags =>
-  (tags ?? []).some(t => EXCLUDE_TAG_PREFIXES.some(prefix => t.startsWith(prefix)));
+const PAGE_LIMIT      = 100;
+const WINDOW_START_YR = 2020;
+const RETRYABLE       = new Set([429, 502, 503, 504]);
+const sleep           = ms => new Promise(r => setTimeout(r, ms));
 
-const RETRYABLE = new Set([429, 502, 503, 504]);
-const sleep     = ms => new Promise(r => setTimeout(r, ms));
+// ── Date window generator ─────────────────────────────────────────────────────
+
+/**
+ * Generate weekly ISO date windows from startYear-01-01 through today.
+ * Weekly chunks keep each window well under GHL's 10K-per-query cap.
+ * @returns {Array<{ label: string, gte: string, lte: string }>}
+ */
+function weeklyWindows() {
+  const windows = [];
+  const now     = new Date();
+  let cursor    = new Date(Date.UTC(WINDOW_START_YR, 0, 1));
+
+  while (cursor <= now) {
+    const gte        = cursor.toISOString();
+    const nextCursor = new Date(cursor.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const lte        = new Date(Math.min(nextCursor.getTime(), now.getTime() + 86400000) - 1).toISOString();
+    const label      = cursor.toISOString().slice(0, 10);
+    windows.push({ label, gte, lte });
+    cursor = nextCursor;
+  }
+
+  return windows;
+}
 
 // ── Checkpoint helpers ────────────────────────────────────────────────────────
 
-function saveCheckpoint(pos) {
+/**
+ * @param {{ doneWindows: string[], windowStats: object, cappedWindows: string[], contacts: object }} state
+ */
+function saveCheckpoint(state) {
   mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  writeFileSync(CP_POS_FILE, JSON.stringify(pos));
-}
-
-function appendContactsToCheckpoint(contacts) {
-  mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  appendFileSync(CP_DATA_FILE, contacts.map(c => JSON.stringify(c)).join('\n') + '\n');
+  writeFileSync(CP_FILE, JSON.stringify(state));
 }
 
 function loadCheckpoint() {
-  if (!existsSync(CP_POS_FILE)) return null;
-  try {
-    const pos       = JSON.parse(readFileSync(CP_POS_FILE, 'utf-8'));
-    const collected = existsSync(CP_DATA_FILE)
-      ? readFileSync(CP_DATA_FILE, 'utf-8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
-      : [];
-    return { ...pos, collected };
-  } catch {
-    return null;
-  }
+  if (!existsSync(CP_FILE)) return null;
+  try { return JSON.parse(readFileSync(CP_FILE, 'utf-8')); } catch { return null; }
 }
 
 function clearCheckpoint() {
-  try { unlinkSync(CP_POS_FILE); } catch {}
-  try { unlinkSync(CP_DATA_FILE); } catch {}
+  try { unlinkSync(CP_FILE); } catch {}
+}
+
+// ── Search with retry ─────────────────────────────────────────────────────────
+
+/**
+ * Fetch one page of contacts for a given date window.
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} locationId
+ * @param {{ label: string, gte: string, lte: string }} window
+ * @param {number} page
+ * @param {number} retries
+ * @returns {Promise<{ contacts: object[], total: number }>}
+ */
+async function searchPage(client, locationId, window, page, retries = 6) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await client.post('/contacts/search', {
+        locationId,
+        filters: [
+          { field: 'dateAdded', operator: 'range', value: { gte: window.gte, lte: window.lte } },
+        ],
+        pageLimit: PAGE_LIMIT,
+        page,
+      });
+      return { contacts: res.data?.contacts ?? [], total: res.data?.total ?? 0 };
+    } catch (err) {
+      const status      = err.response?.status;
+      const isRetryable = RETRYABLE.has(status) || !status;
+      if (isRetryable && attempt < retries) {
+        const delay = 2000 * attempt;
+        logger.warn(`GHL ${status ?? 'network'} window=${window.label} page=${page} — retry ${attempt} in ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+      throw new Error(`search window=${window.label} page=${page} failed: ${err.message}`);
+    }
+  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   const config = loadConfig();
-
-  const isSample   = TARGET_COUNT <= 1000;
-  const outputFile = isSample ? 'registrants-sample.json' : 'registrants.json';
-
-  console.log(`\n=== GHL Extract — General Registrants (contacts API) ===`);
-  console.log(`  Strategy : cursor-based contact pagination`);
-  console.log(`  Exclude  : hs_transfer / hs-to-hl_temp_* tags (HubSpot→GHL syncs)`);
-  console.log(`  Target   : ${TARGET_COUNT} contacts`);
-  console.log(`  Output   : data/samples/${outputFile}`);
-  console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
 
   const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
   const GHL_VERSION  = process.env.GHL_VERSION  || '2021-07-28';
@@ -115,143 +146,138 @@ async function main() {
     },
   });
 
-  let collected    = [];
-  let startAfterId = null;
-  let page         = 1;
-  let scanned      = 0;
-  let skipped      = 0;
-  let savedCount   = 0;
+  const windows = weeklyWindows();
+
+  console.log(`\n=== GHL Extract — All Registrants (weekly date chunks, no tag filter) ===`);
+  console.log(`  Windows  : ${windows.length} weekly windows (${windows[0].label} → ${windows.at(-1).label})`);
+  console.log(`  Resume   : ${RESUME ? 'YES — loading checkpoint' : 'no'}\n`);
+
+  const contactMap   = new Map();
+  let doneWindows    = new Set();
+  let windowStats    = {};
+  let cappedWindows  = [];
 
   if (RESUME) {
     const cp = loadCheckpoint();
     if (cp) {
-      collected    = cp.collected;
-      startAfterId = cp.startAfterId ?? null;
-      page         = cp.page ?? 1;
-      scanned      = cp.scanned ?? 0;
-      skipped      = cp.skipped ?? 0;
-      savedCount   = collected.length;
-      console.log(`  Resumed: ${collected.length} contacts already saved. Continuing from page ${page} (cursor: ${startAfterId ?? 'start'})\n`);
+      for (const [id, contact] of Object.entries(cp.contacts ?? {})) contactMap.set(id, contact);
+      doneWindows   = new Set(cp.doneWindows ?? []);
+      windowStats   = cp.windowStats ?? {};
+      cappedWindows = cp.cappedWindows ?? [];
+      console.log(`  Resumed: ${contactMap.size} contacts, ${doneWindows.size} windows already done\n`);
     } else {
       console.log('  No checkpoint found — starting fresh\n');
     }
   }
 
-  logger.info(`extract-reg: start — target=${TARGET_COUNT}, resume=${RESUME}, already=${collected.length}`);
+  logger.info(`extract-reg: start — windows=${windows.length}, resume=${RESUME}, already=${contactMap.size}`);
 
   const startTime = Date.now();
 
-  while (collected.length < TARGET_COUNT) {
-    const params = { locationId: config.ghl.locationId, limit: 100 };
-    if (startAfterId) params.startAfterId = startAfterId;
+  for (const window of windows) {
+    if (doneWindows.has(window.label)) continue;
 
-    let response;
-    let attempt = 0;
+    let page        = 1;
+    let windowCount = 0;
+    let total       = null;
+    let hitCap      = false;
+
     while (true) {
-      attempt++;
-      try {
-        response = await client.get('/contacts/', { params });
+      const { contacts, total: t } = await searchPage(client, config.ghl.locationId, window, page);
+
+      if (total === null) total = t;
+
+      for (const contact of contacts) {
+        if (!contactMap.has(contact.id)) contactMap.set(contact.id, contact);
+        windowCount++;
+      }
+
+      process.stdout.write(
+        `\r  ${window.label} | page ${page} | window: ${windowCount}/${total ?? '?'} | unique total: ${contactMap.size}  `
+      );
+
+      if (contacts.length < PAGE_LIMIT) break;
+
+      if (page >= 100) {
+        hitCap = true;
+        logger.warn(`extract-reg: window ${window.label} hit 100-page cap at ${windowCount} contacts — some contacts in this week may be missed`);
+        cappedWindows.push(window.label);
         break;
-      } catch (err) {
-        const status     = err.response?.status;
-        const isRetryable = RETRYABLE.has(status) || !status;
-        if (isRetryable && attempt <= 6) {
-          const delay = 2000 * attempt;
-          logger.warn(`GHL ${status ?? 'SSL/network'} error on page ${page} — retry ${attempt} in ${delay}ms`);
-          await sleep(delay);
-          continue;
-        }
-        throw new Error(`Contacts page ${page} failed: ${err.message}`);
       }
+
+      page++;
+      await sleep(150);
     }
 
-    const contacts = response.data?.contacts ?? [];
-    const meta     = response.data?.meta ?? {};
-    scanned       += contacts.length;
+    if (total > 0 || windowCount > 0) process.stdout.write('\n');
 
-    if (contacts.length === 0) break;
+    doneWindows.add(window.label);
+    windowStats[window.label] = { total, collected: windowCount, capped: hitCap };
 
-    for (const contact of contacts) {
-      if (collected.length >= TARGET_COUNT) break;
-      if (isSyncContact(contact.tags)) {
-        skipped++;
-        continue;
-      }
-      collected.push(contact);
-    }
-
-    process.stdout.write(
-      `\r  Scanned: ${scanned} | Skipped (sync): ${skipped} | Collected: ${collected.length}/${TARGET_COUNT} | Page: ${page}  `
-    );
-
-    if (collected.length - savedCount >= CHECKPOINT_EVERY) {
-      appendContactsToCheckpoint(collected.slice(savedCount));
-      savedCount = collected.length;
-      saveCheckpoint({ startAfterId, page, scanned, skipped });
-    }
-
-    if (scanned % 5000 === 0) {
-      logger.info(`extract-reg page ${page}: scanned=${scanned}, skipped=${skipped}, collected=${collected.length}`);
-    }
-
-    startAfterId = meta.startAfterId ?? null;
-    if (!startAfterId || contacts.length < 100) break;
-    page++;
+    saveCheckpoint({
+      doneWindows:  [...doneWindows],
+      windowStats,
+      cappedWindows,
+      contacts:     Object.fromEntries(contactMap),
+    });
   }
 
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n\n  Done in ${elapsed}s`);
+  const elapsed  = ((Date.now() - startTime) / 1000).toFixed(1);
+  const contacts = [...contactMap.values()];
 
-  if (collected.length === 0) {
-    console.log('  No contacts collected. Check API key and location ID.');
+  console.log(`\n  Done in ${elapsed}s`);
+  console.log(`  Unique contacts collected: ${contacts.length}`);
+
+  if (cappedWindows.length > 0) {
+    console.log(`\n  ⚠ WARNING: ${cappedWindows.length} weekly window(s) hit the 10K cap — contacts in those weeks may be incomplete:`);
+    for (const w of cappedWindows) console.log(`    - ${w}`);
+    console.log(`  Consider re-running those windows with daily sub-chunking.`);
+  }
+
+  if (contacts.length === 0) {
+    console.log('  No contacts found. Check API key and location ID.');
     process.exit(0);
   }
 
+  // Build report
   const tagCounts = {};
-  for (const contact of collected) {
-    for (const tag of contact.tags ?? []) tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
+  for (const c of contacts) {
+    for (const t of c.tags ?? []) tagCounts[t] = (tagCounts[t] ?? 0) + 1;
   }
-  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 20)
+  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30)
     .map(([tag, count]) => ({ tag, count }));
 
-  const sample = collected.slice(0, 5).map(c => ({
+  const sample = contacts.slice(0, 5).map(c => ({
     id: c.id,
     name: `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(),
     tags: (c.tags ?? []).slice(0, 5),
   }));
 
-  const unique = [...new Map(collected.map(c => [c.id, c])).values()];
-
   const report = {
     timestamp: new Date().toISOString(),
-    strategy: 'contacts-api-cursor-pagination',
-    config: { targetCount: TARGET_COUNT },
-    results: { pagesScanned: page, contactsScanned: scanned, syncContactsSkipped: skipped, contactsCollected: unique.length, duplicatesRemoved: collected.length - unique.length, elapsedSeconds: parseFloat(elapsed) },
+    strategy: 'contacts-search-api-weekly-date-chunks',
+    windowCount: windows.length,
+    cappedWindows,
+    results: { contactsCollected: contacts.length, elapsedSeconds: parseFloat(elapsed) },
     sample,
     topTags,
   };
-  if (unique.length !== collected.length) {
-    logger.warn(`Dedup: removed ${collected.length - unique.length} duplicate contacts before writing`);
-    console.log(`  ⚠ Removed ${collected.length - unique.length} duplicates (cursor pagination overlap)`);
-  }
 
   mkdirSync(SAMPLES_DIR, { recursive: true });
-  writeFileSync(join(SAMPLES_DIR, outputFile), JSON.stringify(unique, null, 2));
+  writeFileSync(join(SAMPLES_DIR, 'registrants.json'), JSON.stringify(contacts, null, 2));
 
   mkdirSync(REPORTS_DIR, { recursive: true });
-  const timestamp  = new Date().toISOString().replace(/[:.]/g, '-');
-  const reportPath = join(REPORTS_DIR, `extract-reg-${timestamp}.json`);
-  writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  writeFileSync(join(REPORTS_DIR, `extract-reg-${timestamp}.json`), JSON.stringify(report, null, 2));
 
   clearCheckpoint();
 
-  console.log(`=== Summary ===`);
-  console.log(`  Pages scanned          : ${page}`);
-  console.log(`  Contacts scanned       : ${scanned}`);
-  console.log(`  Sync contacts skipped  : ${skipped}`);
-  console.log(`  Contacts collected     : ${unique.length} (${collected.length - unique.length} duplicates removed)`);
-  console.log(`  Elapsed                : ${elapsed}s`);
-  console.log(`\n  Output : data/samples/${outputFile}`);
+  console.log(`\n=== Summary ===`);
+  console.log(`  Unique contacts : ${contacts.length}`);
+  console.log(`  Windows scanned : ${windows.length}`);
+  console.log(`  Capped windows  : ${cappedWindows.length}`);
+  console.log(`  Elapsed         : ${elapsed}s`);
+  console.log(`\n  Output : data/samples/registrants.json`);
   console.log(`  Report : data/reports/extract-reg-${timestamp}.json`);
 
   if (sample.length > 0) {
@@ -259,7 +285,7 @@ async function main() {
     for (const s of sample) console.log(`    ${s.id}  ${s.name.padEnd(30)}  ${s.tags.join(', ')}`);
   }
 
-  logger.info('extract-registrants complete', { collected: collected.length, skipped, elapsed });
+  logger.info('extract-registrants complete', { collected: contacts.length, elapsed, cappedWindows: cappedWindows.length });
 }
 
 main().catch(err => {

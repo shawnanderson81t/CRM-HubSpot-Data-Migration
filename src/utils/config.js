@@ -25,6 +25,7 @@ export function loadConfig() {
     migration: {
       batchSize: parseInt(process.env.BATCH_SIZE || '100'),
       batchDelayMs: parseInt(process.env.BATCH_DELAY_MS || '1500'),
+      concurrency: parseInt(process.env.MIGRATION_CONCURRENCY || '1'),
       maxConcurrent: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '10'),
       rateLimitPerSecond: parseInt(process.env.RATE_LIMIT_PER_SECOND || '10'),
     },

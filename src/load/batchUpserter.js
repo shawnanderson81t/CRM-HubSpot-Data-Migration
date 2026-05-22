@@ -217,12 +217,48 @@ export class BatchUpserter {
       `${tierName}: ${totalContacts} contacts, ${totalBatches} batches, starting at batch ${startBatch}`
     );
 
-    // --- Pass 2: stream-process in batches ───────────────────────────────────
+    // --- Pass 2: stream-process in concurrent rounds ─────────────────────────
+    const CONCURRENCY = this.config.migration.concurrency ?? 1;
+
     const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
 
-    let contactIndex  = 0;
-    let currentBatch  = [];
+    let contactIndex   = 0;
+    let currentBatch   = [];
     let currentBatchNum = startBatch;
+    let pendingBatches  = []; // array of { contacts, batchNum } — one round
+
+    /**
+     * Run all batches in a round concurrently, aggregate results, checkpoint once.
+     * @param {Array<{ contacts: object[], batchNum: number }>} round
+     */
+    const processRound = async (round) => {
+      const results = await Promise.all(
+        round.map(({ contacts, batchNum }) => this.processBatch(contacts, batchNum))
+      );
+      const agg = results.reduce((acc, r) => ({
+        updated:  acc.updated  + r.updated,
+        inserted: acc.inserted + r.inserted,
+        failed:   acc.failed   + r.failed,
+        skipped:  acc.skipped  + r.skipped,
+        errors:   [...acc.errors, ...r.errors],
+      }), { updated: 0, inserted: 0, failed: 0, skipped: 0, errors: [] });
+
+      const lastBatchNum = round[round.length - 1].batchNum;
+      this.checkpoint.update(state, { batchNumber: lastBatchNum, ...agg });
+
+      const pct = (((lastBatchNum + 1) / totalBatches) * 100).toFixed(1);
+      const batchRange = round.length > 1
+        ? `Batches ${round[0].batchNum + 1}–${lastBatchNum + 1}`
+        : `Batch ${lastBatchNum + 1}`;
+      logger.info(
+        `[${tierName}] ${batchRange}/${totalBatches} (${pct}%) — ` +
+        `updated: ${agg.updated}, inserted: ${agg.inserted}, failed: ${agg.failed}, skipped: ${agg.skipped}`
+      );
+
+      if (lastBatchNum < totalBatches - 1) {
+        await new Promise(r => setTimeout(r, this.batchDelayMs));
+      }
+    };
 
     for await (const line of rl) {
       const trimmed = line.trim();
@@ -250,42 +286,22 @@ export class BatchUpserter {
       contactIndex++;
 
       if (currentBatch.length === BATCH_SIZE) {
-        const result = await this.processBatch(currentBatch, currentBatchNum);
-        this.checkpoint.update(state, {
-          batchNumber: currentBatchNum,
-          updated:     result.updated,
-          inserted:    result.inserted,
-          failed:      result.failed,
-          skipped:     result.skipped,
-          errors:      result.errors,
-        });
-        const pct = (((currentBatchNum + 1) / totalBatches) * 100).toFixed(1);
-        logger.info(
-          `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (${pct}%) — ` +
-          `updated: ${result.updated}, inserted: ${result.inserted}, failed: ${result.failed}, skipped: ${result.skipped}`
-        );
-        if (currentBatchNum < totalBatches - 1) {
-          await new Promise(r => setTimeout(r, this.batchDelayMs));
-        }
+        pendingBatches.push({ contacts: currentBatch, batchNum: currentBatchNum });
         currentBatch = [];
+
+        if (pendingBatches.length === CONCURRENCY) {
+          await processRound(pendingBatches);
+          pendingBatches = [];
+        }
       }
     }
 
-    // Process final partial batch
+    // Flush any remaining full batches + final partial batch
     if (currentBatch.length > 0) {
-      const result = await this.processBatch(currentBatch, currentBatchNum);
-      this.checkpoint.update(state, {
-        batchNumber: currentBatchNum,
-        updated:     result.updated,
-        inserted:    result.inserted,
-        failed:      result.failed,
-        skipped:     result.skipped,
-        errors:      result.errors,
-      });
-      logger.info(
-        `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (100%) — ` +
-        `updated: ${result.updated}, inserted: ${result.inserted}, failed: ${result.failed}, skipped: ${result.skipped}`
-      );
+      pendingBatches.push({ contacts: currentBatch, batchNum: currentBatchNum });
+    }
+    if (pendingBatches.length > 0) {
+      await processRound(pendingBatches);
     }
 
     this.checkpoint.complete(state);

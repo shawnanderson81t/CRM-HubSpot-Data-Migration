@@ -508,6 +508,26 @@ const PROPERTIES_TO_CREATE = [
     options: [],
   },
 
+  // --- Tax / Entity / Trust setup (sales team request — May 22) ---
+  {
+    name: 'taxentitytrust_setup_date_fulfilled',
+    label: 'Tax/Entity/Trust Setup Date Fulfilled',
+    type: 'date',
+    fieldType: 'date',
+    groupName: 'contactinformation',
+    description: 'Date the tax/entity/trust setup was fulfilled (from GHL)',
+    options: [],
+  },
+  {
+    name: 'taxentitytrust_setup',
+    label: 'Tax/Entity/Trust Setup',
+    type: 'string',
+    fieldType: 'text',
+    groupName: 'contactinformation',
+    description: 'Tax/entity/trust setup status (from GHL)',
+    options: [],
+  },
+
   // --- Events attended (multi-select) ---
   {
     name: 'tlc_events_attended',

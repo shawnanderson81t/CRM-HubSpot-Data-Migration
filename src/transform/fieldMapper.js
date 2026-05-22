@@ -78,6 +78,10 @@ const CUSTOM_FIELD_ID_MAP = {
 
   // --- Events attended multi-select ---
   '8HRVUMTBzK0jS9XBJGxV': { hubspot: 'tlc_events_attended',            transform: 'multiSelect' },
+
+  // --- Tax / Entity / Trust setup (sales team request — May 22) ---
+  '8BtsfPuijoeNPdROqu2c': { hubspot: 'taxentitytrust_setup_date_fulfilled', transform: 'isoDate' },
+  UN0xwHvklPrQEvYbnFtj:   { hubspot: 'taxentitytrust_setup',               transform: null },
 };
 
 /**

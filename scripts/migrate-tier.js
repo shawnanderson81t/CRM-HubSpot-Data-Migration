@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
 import { loadConfig } from '../src/utils/config.js';
 import { HubSpotClient } from '../src/load/hubspotClient.js';
 import { Checkpoint } from '../src/load/checkpoint.js';
@@ -52,16 +52,14 @@ async function main() {
 
   logger.info(`=== Tier ${TIER} Migration: ${tierInfo.name} ===`);
 
-  // Load pre-extracted contacts
-  let allContacts;
+  // Verify data file exists before doing anything
   try {
-    allContacts = JSON.parse(readFileSync(tierInfo.dataFile, 'utf-8'));
+    statSync(tierInfo.dataFile);
   } catch (err) {
     logger.error(`Cannot read data file: ${tierInfo.dataFile}`, { error: err.message });
     logger.error('Run the extract script first to generate this file.');
     process.exit(1);
   }
-  logger.info(`Loaded ${allContacts.length} contacts from ${tierInfo.dataFile}`);
 
   // Load owner map (GHL userId → HubSpot ownerId) — optional but recommended
   let ownerMap = {};
@@ -76,7 +74,18 @@ async function main() {
   const checkpoint    = new Checkpoint(TIER, config.paths.checkpointDir);
   const upserter      = new BatchUpserter(hubspotClient, checkpoint, config, ownerMap);
 
-  const finalState = await upserter.run(allContacts, `tier${TIER}`);
+  let finalState;
+
+  if (TIER === 3) {
+    // Tier 3 (907K contacts, ~3.4GB file) — stream line-by-line to avoid OOM
+    logger.info(`Tier 3: using streaming reader for ${tierInfo.dataFile}`);
+    finalState = await upserter.runStreaming(tierInfo.dataFile, `tier${TIER}`);
+  } else {
+    // Tiers 1 & 2 are small enough to load fully
+    const allContacts = JSON.parse(readFileSync(tierInfo.dataFile, 'utf-8'));
+    logger.info(`Loaded ${allContacts.length} contacts from ${tierInfo.dataFile}`);
+    finalState = await upserter.run(allContacts, `tier${TIER}`);
+  }
 
   logger.info(`=== Tier ${TIER} Complete ===`, {
     succeeded: finalState.succeeded,

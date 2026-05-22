@@ -1,3 +1,5 @@
+import { createReadStream } from 'fs';
+import { createInterface } from 'readline';
 import { cleanRecord } from '../transform/cleaner.js';
 import { mapContact } from '../transform/fieldMapper.js';
 import { deduplicateBatch, buildExistingMap } from '../transform/deduplicator.js';
@@ -165,6 +167,121 @@ export class BatchUpserter {
       if (i < totalBatches - 1) {
         await new Promise(r => setTimeout(r, this.batchDelayMs));
       }
+    }
+
+    this.checkpoint.complete(state);
+    return state;
+  }
+
+  /**
+   * Stream-process a large JSON array file without loading it into RAM.
+   * Designed for registrants.json (one contact per line, produced by ndjsonToJsonArray).
+   *
+   * File format:
+   *   [\n
+   *   {contact1},\n
+   *   {contact2},\n
+   *   ...
+   *   {contactN}\n
+   *   ]\n
+   *
+   * Safe to interrupt and resume — same checkpoint logic as run().
+   *
+   * @param {string} filePath - Path to JSON array file
+   * @param {string} tierName - e.g. 'tier3' (used in log messages)
+   * @returns {Promise<Object>} Final checkpoint state
+   */
+  async runStreaming(filePath, tierName) {
+    // --- Pass 1: count contacts (fast scan, no JSON parsing) ─────────────────
+    let totalContacts = 0;
+    {
+      const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const t = line.trim();
+        if (!t || t === '[' || t === ']') continue;
+        totalContacts++;
+      }
+    }
+    const totalBatches = Math.ceil(totalContacts / BATCH_SIZE);
+    const state = this.checkpoint.load(totalBatches);
+    const startBatch = state.lastBatch + 1;
+
+    if (startBatch >= totalBatches) {
+      logger.info(`${tierName}: already complete — ${state.succeeded} succeeded, ${state.failed} failed`);
+      return state;
+    }
+
+    logger.info(
+      `${tierName}: ${totalContacts} contacts, ${totalBatches} batches, starting at batch ${startBatch}`
+    );
+
+    // --- Pass 2: stream-process in batches ───────────────────────────────────
+    const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+
+    let contactIndex  = 0;
+    let currentBatch  = [];
+    let currentBatchNum = startBatch;
+
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed === '[' || trimmed === ']') continue;
+
+      const batchForThisContact = Math.floor(contactIndex / BATCH_SIZE);
+
+      // Skip contacts belonging to already-completed batches
+      if (batchForThisContact < startBatch) {
+        contactIndex++;
+        continue;
+      }
+
+      let contact;
+      try {
+        const jsonStr = trimmed.endsWith(',') ? trimmed.slice(0, -1) : trimmed;
+        contact = JSON.parse(jsonStr);
+      } catch {
+        contactIndex++;
+        continue;
+      }
+
+      currentBatch.push(contact);
+      currentBatchNum = batchForThisContact;
+      contactIndex++;
+
+      if (currentBatch.length === BATCH_SIZE) {
+        const result = await this.processBatch(currentBatch, currentBatchNum);
+        this.checkpoint.update(state, {
+          batchNumber: currentBatchNum,
+          succeeded:   result.succeeded,
+          failed:      result.failed,
+          skipped:     result.skipped,
+          errors:      result.errors,
+        });
+        const pct = (((currentBatchNum + 1) / totalBatches) * 100).toFixed(1);
+        logger.info(
+          `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (${pct}%) — ` +
+          `succeeded: ${result.succeeded}, failed: ${result.failed}, skipped: ${result.skipped}`
+        );
+        if (currentBatchNum < totalBatches - 1) {
+          await new Promise(r => setTimeout(r, this.batchDelayMs));
+        }
+        currentBatch = [];
+      }
+    }
+
+    // Process final partial batch
+    if (currentBatch.length > 0) {
+      const result = await this.processBatch(currentBatch, currentBatchNum);
+      this.checkpoint.update(state, {
+        batchNumber: currentBatchNum,
+        succeeded:   result.succeeded,
+        failed:      result.failed,
+        skipped:     result.skipped,
+        errors:      result.errors,
+      });
+      logger.info(
+        `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (100%) — ` +
+        `succeeded: ${result.succeeded}, failed: ${result.failed}, skipped: ${result.skipped}`
+      );
     }
 
     this.checkpoint.complete(state);

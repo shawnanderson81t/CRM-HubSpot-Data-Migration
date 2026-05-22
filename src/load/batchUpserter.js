@@ -39,7 +39,7 @@ export class BatchUpserter {
    *
    * @param {Object[]} rawContacts - Raw GHL contact objects (max 100)
    * @param {number} batchNumber - For logging
-   * @returns {Promise<{ succeeded: number, failed: number, skipped: number, errors: Array }>}
+   * @returns {Promise<{ updated: number, inserted: number, failed: number, skipped: number, errors: Array }>}
    */
   async processBatch(rawContacts, batchNumber) {
     // Step 1 — Clean
@@ -82,8 +82,9 @@ export class BatchUpserter {
       `Batch ${batchNumber}: ${updates.length} updates, ${inserts.length} inserts, ${unresolvable.length} unresolvable`
     );
 
-    let succeeded = 0;
-    let failed = 0;
+    let updated  = 0;
+    let inserted = 0;
+    let failed   = 0;
     const errors = [];
 
     // Step 5 — Batch update (contacts that exist in HubSpot)
@@ -105,20 +106,20 @@ export class BatchUpserter {
         logger.warn(`Batch ${batchNumber}: deduped ${safeUpdates.length - uniqueUpdates.length} duplicate hubspotIds from update batch`);
       }
       const res = await this.hs.batchUpdateContacts(uniqueUpdates);
-      succeeded += res.succeeded;
-      failed    += res.failed;
+      updated += res.succeeded;
+      failed  += res.failed;
       errors.push(...res.errors);
     }
 
     // Step 6 — Batch create (new contacts)
     if (inserts.length > 0) {
       const res = await this.hs.batchCreateContacts(inserts);
-      succeeded += res.succeeded;
-      failed    += res.failed;
+      inserted += res.succeeded;
+      failed   += res.failed;
       errors.push(...res.errors);
     }
 
-    return { succeeded, failed, skipped: unresolvable.length, errors };
+    return { updated, inserted, failed, skipped: unresolvable.length, errors };
   }
 
   /**
@@ -151,7 +152,8 @@ export class BatchUpserter {
 
       this.checkpoint.update(state, {
         batchNumber: i,
-        succeeded:   result.succeeded,
+        updated:     result.updated,
+        inserted:    result.inserted,
         failed:      result.failed,
         skipped:     result.skipped,
         errors:      result.errors,
@@ -160,7 +162,7 @@ export class BatchUpserter {
       const pct = (((i + 1) / totalBatches) * 100).toFixed(1);
       logger.info(
         `[${tierName}] Batch ${i + 1}/${totalBatches} (${pct}%) — ` +
-        `succeeded: ${result.succeeded}, failed: ${result.failed}, skipped: ${result.skipped}`
+        `updated: ${result.updated}, inserted: ${result.inserted}, failed: ${result.failed}, skipped: ${result.skipped}`
       );
 
       // Rate limit gap between batches (skip after last batch)
@@ -251,7 +253,8 @@ export class BatchUpserter {
         const result = await this.processBatch(currentBatch, currentBatchNum);
         this.checkpoint.update(state, {
           batchNumber: currentBatchNum,
-          succeeded:   result.succeeded,
+          updated:     result.updated,
+          inserted:    result.inserted,
           failed:      result.failed,
           skipped:     result.skipped,
           errors:      result.errors,
@@ -259,7 +262,7 @@ export class BatchUpserter {
         const pct = (((currentBatchNum + 1) / totalBatches) * 100).toFixed(1);
         logger.info(
           `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (${pct}%) — ` +
-          `succeeded: ${result.succeeded}, failed: ${result.failed}, skipped: ${result.skipped}`
+          `updated: ${result.updated}, inserted: ${result.inserted}, failed: ${result.failed}, skipped: ${result.skipped}`
         );
         if (currentBatchNum < totalBatches - 1) {
           await new Promise(r => setTimeout(r, this.batchDelayMs));
@@ -273,14 +276,15 @@ export class BatchUpserter {
       const result = await this.processBatch(currentBatch, currentBatchNum);
       this.checkpoint.update(state, {
         batchNumber: currentBatchNum,
-        succeeded:   result.succeeded,
+        updated:     result.updated,
+        inserted:    result.inserted,
         failed:      result.failed,
         skipped:     result.skipped,
         errors:      result.errors,
       });
       logger.info(
         `[${tierName}] Batch ${currentBatchNum + 1}/${totalBatches} (100%) — ` +
-        `succeeded: ${result.succeeded}, failed: ${result.failed}, skipped: ${result.skipped}`
+        `updated: ${result.updated}, inserted: ${result.inserted}, failed: ${result.failed}, skipped: ${result.skipped}`
       );
     }
 

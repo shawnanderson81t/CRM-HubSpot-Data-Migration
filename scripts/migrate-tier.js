@@ -88,6 +88,8 @@ async function main() {
   }
 
   logger.info(`=== Tier ${TIER} Complete ===`, {
+    updated:   finalState.updated,
+    inserted:  finalState.inserted,
     succeeded: finalState.succeeded,
     failed:    finalState.failed,
     skipped:   finalState.skipped,

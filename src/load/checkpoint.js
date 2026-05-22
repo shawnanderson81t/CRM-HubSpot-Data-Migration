@@ -49,6 +49,8 @@ export class Checkpoint {
       lastBatch: -1,
       totalBatches,
       processed: 0,
+      updated: 0,
+      inserted: 0,
       succeeded: 0,
       failed: 0,
       skipped: 0,
@@ -65,11 +67,14 @@ export class Checkpoint {
    * @param {Object} batchResult - { batchNumber, succeeded, failed, skipped, errors }
    */
   update(state, batchResult) {
-    state.lastBatch = batchResult.batchNumber;
-    state.processed += batchResult.succeeded + batchResult.failed + batchResult.skipped;
-    state.succeeded += batchResult.succeeded;
-    state.failed += batchResult.failed;
-    state.skipped += batchResult.skipped;
+    const batchSucceeded = (batchResult.updated ?? 0) + (batchResult.inserted ?? 0) + (batchResult.succeeded ?? 0);
+    state.lastBatch  = batchResult.batchNumber;
+    state.processed += batchSucceeded + batchResult.failed + batchResult.skipped;
+    state.updated   = (state.updated  ?? 0) + (batchResult.updated  ?? 0);
+    state.inserted  = (state.inserted ?? 0) + (batchResult.inserted ?? 0);
+    state.succeeded  = (state.succeeded ?? 0) + batchSucceeded;
+    state.failed    += batchResult.failed;
+    state.skipped   += batchResult.skipped;
 
     if (batchResult.errors) {
       state.failedRecords.push(

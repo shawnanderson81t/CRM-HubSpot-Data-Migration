@@ -42,6 +42,7 @@ const MANUAL_CSV    = join(REPORTS_DIR,   'dedup-manual-review.csv');
 const MERGE_CP_FILE = join(CP_DIR,        'dedup-merge-checkpoint.json');
 
 const PULL    = process.argv.includes('--pull');
+const ANALYZE = process.argv.includes('--analyze');
 const MERGE   = process.argv.includes('--merge');
 const DRY_RUN = process.argv.includes('--dry-run');
 const RESUME  = process.argv.includes('--resume');
@@ -101,8 +102,11 @@ function isCommonDomain(domain) {
 
 /**
  * Determine if two same-name contacts are duplicates and how to handle them.
- * Returns null if they are clearly NOT duplicates (e.g. different valid emails
- * that don't look like typos of each other).
+ * Returns null if they are clearly NOT duplicates.
+ *
+ * Same name alone is NOT enough — the database has thousands of people named
+ * "John Smith". A second corroborating signal (email typo, same phone, or same
+ * email local-part) is required before flagging a pair.
  *
  * @param {Object} c1
  * @param {Object} c2
@@ -111,9 +115,15 @@ function isCommonDomain(domain) {
 function classifyPair(c1, c2) {
   const e1 = (c1.properties?.email || '').toLowerCase().trim();
   const e2 = (c2.properties?.email || '').toLowerCase().trim();
+  const p1 = (c1.properties?.phone || '').replace(/\D/g, '');
+  const p2 = (c2.properties?.phone || '').replace(/\D/g, '');
 
+  // One has no email — can only merge if they also share a phone (otherwise too risky)
   if (!e1 || !e2) {
-    return { classification: 'auto-merge', reason: !e1 ? 'primary_no_email' : 'duplicate_no_email' };
+    if (p1 && p2 && p1 === p2 && p1.length >= 10) {
+      return { classification: 'auto-merge', reason: 'same_phone_one_no_email' };
+    }
+    return null;
   }
 
   if (e1 === e2) return null;
@@ -126,7 +136,7 @@ function classifyPair(c1, c2) {
     return { classification: 'auto-merge', reason: 'domain_typo' };
   }
 
-  // Same domain, typo local part (e.g. john1 vs john)
+  // Same domain, typo local part (e.g. joh@gmail.com vs john@gmail.com)
   if (domain1 === domain2 && levenshtein(local1, local2) <= 1) {
     return { classification: 'auto-merge', reason: 'local_typo' };
   }
@@ -136,8 +146,23 @@ function classifyPair(c1, c2) {
     return { classification: 'auto-merge', reason: 'email_typo' };
   }
 
-  // Both emails look different — needs human judgment
-  return { classification: 'manual-review', reason: 'different_emails' };
+  // Same phone number + same name = very strong signal, different email
+  if (p1 && p2 && p1 === p2 && p1.length >= 10) {
+    return { classification: 'manual-review', reason: 'same_phone_different_email' };
+  }
+
+  // Same email local part, different domain (e.g. john@gmail.com vs john@yahoo.com)
+  if (local1 === local2 && local1.length >= 4) {
+    return { classification: 'manual-review', reason: 'same_local_different_domain' };
+  }
+
+  // Email distance 3–4 (possible typo but not certain)
+  if (levenshtein(e1, e2) <= 4) {
+    return { classification: 'manual-review', reason: 'possible_email_typo' };
+  }
+
+  // No corroborating signal — different people who share a name
+  return null;
 }
 
 /**
@@ -422,11 +447,20 @@ async function main() {
     await pullContacts(client);
     const { autoMerge, manualReview } = await findDuplicatePairs();
     writePairsReport({ autoMerge, manualReview });
+  } else if (ANALYZE) {
+    // Re-run analysis on already-pulled data — no API calls needed
+    if (!existsSync(CONTACTS_NDJSON)) {
+      console.error('No local contacts data found. Run npm run dedup:pull first.');
+      process.exit(1);
+    }
+    const { autoMerge, manualReview } = await findDuplicatePairs();
+    writePairsReport({ autoMerge, manualReview });
   } else if (MERGE || DRY_RUN) {
     await mergeDuplicates(client, DRY_RUN);
   } else {
     console.log('\nUsage:');
     console.log('  npm run dedup:pull      pull contacts & identify duplicate pairs');
+    console.log('  npm run dedup:analyze   re-run analysis on already-pulled data (no API call)');
     console.log('  npm run dedup:dry-run   preview merges without touching HubSpot');
     console.log('  npm run dedup:merge     execute auto-merge pairs');
   }

@@ -32,6 +32,9 @@
     "report:tier1": "node scripts/migration-report.js --tier=1",
     "report:tier2": "node scripts/migration-report.js --tier=2",
     "report:tier3": "node scripts/migration-report.js --tier=3",
+    "dedup:pull": "node scripts/dedup-hubspot.js --pull",
+    "dedup:dry-run": "node scripts/dedup-hubspot.js --dry-run",
+    "dedup:merge": "node scripts/dedup-hubspot.js --merge",
     "validate:pilot": "node scripts/validate-pilot.js",
     "test": "node --test src/**/*.test.js"
   },

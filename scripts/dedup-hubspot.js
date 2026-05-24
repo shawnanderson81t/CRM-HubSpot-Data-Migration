@@ -147,8 +147,9 @@ function classifyPair(c1, c2) {
   }
 
   // Same phone number + same name = very strong signal, different email
+  // Primary chosen by most recent hs_last_activity_date (per Andy's request, 2026-05-24)
   if (p1 && p2 && p1 === p2 && p1.length >= 10) {
-    return { classification: 'manual-review', reason: 'same_phone_different_email' };
+    return { classification: 'auto-merge', reason: 'same_phone_different_email' };
   }
 
   // Same email local part, different domain (e.g. john@gmail.com vs john@yahoo.com)
@@ -167,7 +168,9 @@ function classifyPair(c1, c2) {
 
 /**
  * Choose which contact to keep (primary) and which to merge away.
- * Prefers: valid/common domain > has email > older record.
+ * Prefers: valid/common domain > has email > most recently active (hs_last_activity_date).
+ * Using most recently active aligns with Andy's preference for same_phone_different_email pairs
+ * and is a sensible default for all pair types.
  *
  * @param {Object} c1
  * @param {Object} c2
@@ -187,10 +190,10 @@ function choosePrimary(c1, c2) {
   if (e1 && !e2) return { primary: c1, toMerge: c2 };
   if (e2 && !e1) return { primary: c2, toMerge: c1 };
 
-  // Keep the older record
-  const t1 = new Date(c1.properties?.createdate || 0).getTime();
-  const t2 = new Date(c2.properties?.createdate || 0).getTime();
-  return t1 <= t2 ? { primary: c1, toMerge: c2 } : { primary: c2, toMerge: c1 };
+  // Keep the most recently active contact (most recently used = primary)
+  const a1 = new Date(c1.properties?.hs_last_activity_date || c1.properties?.createdate || 0).getTime();
+  const a2 = new Date(c2.properties?.hs_last_activity_date || c2.properties?.createdate || 0).getTime();
+  return a1 >= a2 ? { primary: c1, toMerge: c2 } : { primary: c2, toMerge: c1 };
 }
 
 // ── HubSpot API with retry ────────────────────────────────────────────────────
@@ -229,7 +232,7 @@ async function pullContacts(client) {
   mkdirSync(CP_DIR, { recursive: true });
 
   const ws    = createWriteStream(CONTACTS_NDJSON);
-  const PROPS = 'firstname,lastname,email,phone,createdate';
+  const PROPS = 'firstname,lastname,email,phone,createdate,hs_last_activity_date';
   let after   = undefined;
   let total   = 0;
 

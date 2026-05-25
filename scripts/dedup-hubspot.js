@@ -375,27 +375,29 @@ async function mergeDuplicates(client, dryRun) {
   const report = JSON.parse(readFileSync(PAIRS_FILE, 'utf-8'));
   const pairs  = report.autoMerge;
 
-  let startIndex  = 0;
-  let mergedCount = 0;
-  let failedCount = 0;
+  let startIndex   = 0;
+  let mergedCount  = 0;
+  let failedCount  = 0;
+  const failedRecords = [];
 
   if (RESUME && existsSync(MERGE_CP_FILE)) {
     const cp = JSON.parse(readFileSync(MERGE_CP_FILE, 'utf-8'));
-    startIndex  = cp.lastIndex + 1;
-    mergedCount = cp.merged;
-    failedCount = cp.failed;
+    startIndex   = cp.lastIndex + 1;
+    mergedCount  = cp.merged;
+    failedCount  = cp.failed;
+    failedRecords.push(...(cp.failedRecords ?? []));
     console.log(`\n  Resuming from pair ${startIndex} (${mergedCount} already merged)`);
   }
 
   const saveCheckpoint = (idx) => {
-    writeFileSync(MERGE_CP_FILE, JSON.stringify({ lastIndex: idx, merged: mergedCount, failed: failedCount }));
+    writeFileSync(MERGE_CP_FILE, JSON.stringify({ lastIndex: idx, merged: mergedCount, failed: failedCount, failedRecords }));
   };
 
   const remaining = pairs.length - startIndex;
   console.log(`\n  ${dryRun ? '[DRY RUN] ' : ''}Processing ${remaining.toLocaleString()} auto-merge pairs...`);
 
   for (let i = startIndex; i < pairs.length; i++) {
-    const { primary, toMerge } = pairs[i];
+    const { primary, toMerge, reason } = pairs[i];
 
     if (dryRun) {
       console.log(`  [DRY RUN] ${toMerge.email || toMerge.id}  →  ${primary.email || primary.id}`);
@@ -413,7 +415,18 @@ async function mergeDuplicates(client, dryRun) {
       );
       mergedCount++;
     } catch (err) {
-      logger.warn(`merge failed: ${toMerge.id}→${primary.id} — ${err.response?.data?.message || err.message}`);
+      const errorMsg = err.response?.data?.message || err.message;
+      logger.warn(`merge failed: ${toMerge.id}→${primary.id} — ${errorMsg}`);
+      failedRecords.push({
+        reason,
+        primaryId:    primary.id,
+        primaryEmail: primary.email,
+        primaryName:  `${primary.firstname} ${primary.lastname}`.trim(),
+        toMergeId:    toMerge.id,
+        toMergeEmail: toMerge.email,
+        toMergeName:  `${toMerge.firstname} ${toMerge.lastname}`.trim(),
+        error:        errorMsg,
+      });
       failedCount++;
     }
 
@@ -427,11 +440,25 @@ async function mergeDuplicates(client, dryRun) {
 
   saveCheckpoint(pairs.length - 1);
 
+  // Write failed records report
+  mkdirSync(REPORTS_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const mergeReportPath = join(REPORTS_DIR, `dedup-merge-report-${ts}.json`);
+  writeFileSync(mergeReportPath, JSON.stringify({
+    generatedAt:    new Date().toISOString(),
+    totalPairs:     pairs.length,
+    merged:         mergedCount,
+    failed:         failedCount,
+    skipped:        report.manualReviewPairs,
+    failedRecords,
+  }, null, 2));
+
   console.log('\n\n  ── Merge Complete ────────────────────────────────────');
   console.log(`  Merged  : ${mergedCount.toLocaleString()}`);
   console.log(`  Failed  : ${failedCount.toLocaleString()}`);
   console.log(`  Skipped : ${report.manualReviewPairs.toLocaleString()} manual-review pairs`);
   console.log('            → see data/reports/dedup-manual-review.csv for client review');
+  console.log(`\n  Report saved to: ${mergeReportPath}`);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

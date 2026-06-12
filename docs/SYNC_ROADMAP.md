@@ -1,341 +1,262 @@
-# GHL → HubSpot Daily Sync — Project Roadmap
+# GoHighLevel → HubSpot Daily Sync — Implementation Roadmap
 
 **Prepared by:** Shawn Anderson
 **Date:** June 4, 2026
-**Version:** 1.0
+**Status:** Planning — for client review
 
 ---
 
 ## Executive Summary
 
-The one-time data migration from GoHighLevel (Engager) to HubSpot is complete — 910,784 contacts
-successfully transferred. However, new contacts and updates entering GoHighLevel daily are not
-reflected in HubSpot, and this gap compounds every day.
+The one-time migration moved 910,784 contacts from GoHighLevel (Engager) into HubSpot. That job
+is done. But Engager keeps changing every day — new registrations, new buyers, updated tags,
+moved opportunity stages — and none of that is reaching HubSpot anymore. The gap has been growing
+since the migration snapshot of May 20.
 
-This roadmap covers converting the existing migration pipeline into a **fully automated daily sync**
-that runs at 2:00 AM MST, pulls only what changed in GHL since the previous run, and pushes it
-into HubSpot — creating new contacts and enriching existing ones, without ever overwriting data
-your team has manually updated in HubSpot.
+This roadmap converts the migration engine we already built into an **automated daily sync** that
+runs every night at 2:00 AM MST. Each run pulls only what changed in Engager since the previous
+run and applies it to HubSpot, with three guarantees the team cares about:
 
-**Estimated total effort:** 12 working days
-**Recommended start:** Immediately
-**Risk level:** Low — approximately 80% of the required components already exist and are
-battle-tested on 910K contacts.
+1. **It never clobbers your team's work.** If someone edits a contact by hand in HubSpot, the sync
+   leaves that edit alone. GHL wins on brand-new contacts and brand-new activity; HubSpot wins on
+   anything your team has touched.
+2. **It never wipes data with blanks.** A missing value in GHL never overwrites a real value in
+   HubSpot. (This rule is already enforced in the existing code.)
+3. **It tells you what it did.** Every morning you get an email summarizing what synced, what
+   failed, and anything that needs a human — plus a structured log file you and the project owner
+   can open at any time.
+
+**The good news on cost:** roughly 70–80% of what this needs already exists and has been proven at
+910K-contact scale — the GHL client, the HubSpot client, the field mapper, the deduplication, the
+retry/backoff, and the resume-on-failure checkpointing. The genuinely new work is the "what changed
+since yesterday" detection, the conflict-resolution rules, the scheduler, and the daily email.
+
+**Honest scope note:** syncing **contact fields** (tags, geolocation, UTM, custom fields) is the
+reuse-heavy part. Syncing **opportunity/deal stages and activity notes** is essentially new
+construction — the migration never touched deals or notes. I've separated those into their own
+phase so the cost driver is visible and you can decide whether to include them now or as a
+follow-on.
+
+**Estimated effort:** 10–12 working days for the contact sync core; 13–16 days if opportunity
+stages and activity notes are included.
 
 ---
 
-## Part 1 — Current State: What the Migration Does Today
+## Part 1 — Current State: What Exists Today
 
-### Entry Points
-| Script | Purpose |
+### Entry points
+| Script | Role |
 |---|---|
-| `scripts/migrate-tier.js` | Main execution — loads contacts file, runs BatchUpserter |
-| `scripts/extract-workshop-buyers.js` | Pulls Tier 1 from GHL pipeline opportunities |
-| `scripts/extract-preview-buyers.js` | Pulls Tier 2 via monthly date-range search chunks |
-| `scripts/extract-registrants.js` | Pulls Tier 3 via cursor pagination |
-| `scripts/dedup-hubspot.js` | Standalone dedup: pull → analyze → dry-run → merge |
+| `scripts/migrate-tier.js` | Main runner. Loads a tier's contact file and drives the upsert. Tier 3 streams a 3.4GB file line-by-line to avoid running out of memory. |
+| `scripts/extract-*.js` | Three tier-specific extractors (pipeline query, date-range search, cursor pagination). |
+| `scripts/dedup-hubspot.js` | Standalone deduplication: pull → analyze → dry-run → merge, with its own checkpoint. |
+| `scripts/migration-report.js` | Reads a checkpoint and prints/saves a run summary. |
+| `scripts/build-owner-map.js` | Matches GHL users to HubSpot owners by email. |
 
-### ETL Flow (Current)
-
+### The ETL flow as it runs today
 ```
-GHL API (read)
-    ↓
-Extract — cursor pagination / search API / pipeline query
-    ↓  [writes to data/*.json or NDJSON on disk]
-Transform
-  ├── cleaner.js        — strips placeholders, normalises email/phone, HTML sanitise
-  ├── fieldMapper.js    — maps ~40 GHL fields + custom field IDs → HubSpot properties
-  ├── geoResolver.js    — event tags (YYYYMMDD_CITYCODE) → market_city values
-  └── deduplicator.js   — match chain: HS contact ID → email → phone
-    ↓
-Load — BatchUpserter
-  ├── batchReadContacts  — look up existing HS records (email / phone / HS ID / GHL ID)
-  ├── batchUpdateContacts — update matched records (strips identity fields to avoid conflicts)
-  └── batchCreateContacts — insert net-new records (with one-by-one fallback on 400)
-    ↓
-checkpoint.js — JSON state file per tier (resume-safe on failure)
+  GHL API  ──extract──▶  data/*.json (or NDJSON on disk)
+                              │
+                              ▼
+   Transform:  cleaner.js  →  fieldMapper.js  →  geoResolver.js
+   (sanitize)     (GHL fields → HubSpot props)   (event tag → market_city)
+                              │
+                              ▼
+   Load (BatchUpserter):
+     • batchReadContacts ×4 in parallel (email / phone / hs_object_id / engager_contact_id)
+     • deduplicateBatch → { updates, inserts, unresolvable }
+     • batchUpdateContacts  (existing records — identity fields stripped to avoid conflicts)
+     • batchCreateContacts  (new records — one-by-one fallback on 400/409)
+                              │
+                              ▼
+   checkpoint.js  →  per-run JSON state (resume-safe)
+   logger.js      →  logs/combined.log + logs/error.log
 ```
 
-### Rate-Limit & Retry Handling
-- **GHL client** (`ghlClient.js`): retry on 429 + SSL/network errors, respects `Retry-After` header,
-  exponential backoff up to 5 attempts
-- **HubSpot client** (`hubspotClient.js`): same pattern, up to 5 retries, handles `INVALID_OPTION`
-  by stripping the offending field and retrying the batch
-- **Dedup script**: `withRetry()` covers 429, 502, 503, 504
+### What's already solid (verified in code)
+- **GHL client** (`src/extract/ghlClient.js`): cursor pagination (`getContacts`), single fetch
+  (`getContact`), tags, custom fields, opportunities, pipeline stages. Retry on 429 + network
+  errors, respects `Retry-After`, 5 attempts.
+- **HubSpot client** (`src/load/hubspotClient.js`): batch update/create/read, contact-to-contact
+  associations (`createAssociation`, v4 — already supports the `guest_of` link), owners, property
+  creation. Exponential backoff on 429/5xx. Sophisticated 400/409 fallbacks (per-record retry,
+  `INVALID_OPTION` field stripping, uniqueness-conflict recovery).
+- **Deduplication** (`src/transform/deduplicator.js`): match chain is **HS contact ID → email →
+  phone** — already exactly the email-primary / phone-secondary rule the sync requires.
+- **Null-safety**: the mapper builds properties with a `setIfPresent` pattern and the upserter
+  strips identity fields from updates — blank GHL values are not written over existing HubSpot data.
+- **Checkpointing** (`src/load/checkpoint.js`): per-run JSON with `lastBatch`, `updated`,
+  `inserted`, `failed`, `skipped`, `failedRecords[]`. Any interrupted run resumes from the last
+  completed batch.
+- **Logging**: structured Winston output to file.
 
-### Checkpointing
-`checkpoint.js` writes a JSON file after every batch with: `lastBatch`, `succeeded`, `updated`,
-`inserted`, `failed`, `skipped`, `failedRecords[]`. Any interrupted run resumes from the last
-completed batch — no re-processing of already-handled contacts.
-
-### Logging
-Winston logger writes structured JSON to `./logs/combined.log` and `./logs/error.log`.
-Every batch logs: contacts processed / updated / inserted / failed / skipped with reasons.
-
-### What Is NOT Currently Supported
-- No scheduler — runs are triggered manually
-- No delta detection — always processes the full dataset
-- No conflict resolution — HubSpot vs GHL field ownership not tracked
-- No summary email at end of run
-- No structured alert on failure
-
----
-
-## Part 2 — Gap Analysis: One-Time Migration → Daily Sync
-
-| Capability | Migration (today) | Daily Sync (needed) |
-|---|---|---|
-| Trigger | Manual | Cron — 2:00 AM MST daily |
-| Data scope | Full dataset each run | Delta only — contacts changed since last sync |
-| GHL extraction | Cursor / pipeline / search | Search API with `dateUpdated` filter |
-| Conflict resolution | None (HubSpot wins by default via non-overwrite) | Explicit: HubSpot wins on manual edits, GHL wins on new activity |
-| Deduplication | Email → phone → HS ID match chain | Same — already correct |
-| Null handling | Never overwrite with blank | Same — already enforced |
-| Idempotency | Partial (checkpoint per batch) | Full — safe to re-run any day's sync |
-| Logging | File-based structured logs | Same + daily summary report |
-| Alerting | None | Email summary at end of run |
-| Scheduling | None | Node-cron or system cron (server) |
-
-### Key Gaps to Close
-
-**1. Delta Detection — "Changed since last run"**
-The GHL Search API supports a `dateUpdated` range filter. The sync will store a `lastSyncAt`
-timestamp after each successful run and query GHL for contacts where `dateUpdated >= lastSyncAt`.
-This is the most critical new component.
-
-**2. Conflict Resolution**
-HubSpot tracks property change history including the source of each write. The plan:
-- Fields updated by a HubSpot user (source = `CRM_UI`) → HubSpot wins, do not overwrite
-- Fields that are blank in HubSpot or last written by our pipeline (source = `API`) → GHL wins
-- New contacts in GHL with no HubSpot record → always create
-- New activity (tags added, stage changes) → always sync regardless of source
-
-**3. Scheduler**
-A `node-cron` job running on the same remote server used for the migration. Triggers the sync
-engine at 2:00 AM MST daily and writes a PID lock file to prevent overlapping runs.
-
-**4. Summary Email**
-At the end of each run, send a structured email (via nodemailer or a transactional service like
-SendGrid) reporting: contacts synced, created, updated, failed, skipped, and any errors
-requiring attention.
-
-**5. Opportunity / Activity Sync (new scope)**
-The migration covered contacts only. The daily sync will also need to handle:
-- GHL opportunity stage changes → HubSpot deal stage updates
-- Activity notes from GHL → HubSpot engagement notes
-- UTM fields from new registrations → HubSpot contact properties
+### What does NOT exist yet
+- No scheduler — every run is launched by hand.
+- No delta detection — extraction always walks the **whole** dataset.
+- No conflict-resolution logic — today HubSpot is protected only passively (blanks/identity fields
+  aren't written); there's no rule that says "don't touch a field a human edited."
+- No daily summary email and no failure alert.
+- No opportunity/deal-stage sync and no activity-note sync — the migration was contacts-only.
 
 ---
 
-## Part 3 — Phased Roadmap
+## Part 2 — Gap Analysis: Migration → Daily Sync
 
-### Phase 1 — Backfill & Foundation (Days 1–2)
-**Goal:** Close the May 20 → today gap and set up the sync state baseline.
-
-**Tasks:**
-- Run a one-time backfill pulling all GHL contacts updated since May 20
-- Verify HubSpot contact counts before and after
-- Write `lastSyncAt` state file with today's timestamp as the sync baseline
-
-**Deliverables:**
-- HubSpot fully current as of go-live date
-- `data/sync-state.json` — baseline sync state file
-- Backfill report (contacts created / updated / failed)
-
-**Effort:** 2 days
-
----
-
-### Phase 2 — Delta Extraction Engine (Days 3–4)
-**Goal:** Replace full-dataset extraction with incremental "changed since last run" pulling.
-
-**Tasks:**
-- Build `scripts/sync-extract.js` — queries GHL Search API with `dateUpdated >= lastSyncAt`
-- Handle GHL's 10K-per-query cap via monthly date-range chunking (already proven in Tier 2)
-- Write delta contacts to NDJSON checkpoint file
-- Update `lastSyncAt` only after successful run completion
-
-**Deliverables:**
-- `scripts/sync-extract.js` — incremental GHL extractor
-- Handles partial failures — retries failed windows on next run
-
-**Effort:** 2 days
-
----
-
-### Phase 3 — Conflict Resolution Layer (Days 5–6)
-**Goal:** Implement HubSpot-wins / GHL-wins rules before any field is written.
-
-**Tasks:**
-- For each contact being updated: fetch HubSpot property history for key fields
-  (`GET /crm/v3/objects/contacts/{id}/property-history?properties=email,phone,...`)
-- If last write source is `CRM_UI` → skip that field (HubSpot team updated it manually)
-- If last write source is `API` or field is blank → allow GHL value through
-- Extend `batchUpserter.js` with a `resolveConflicts(ghlProps, hsContact)` step
-
-**Deliverables:**
-- `src/transform/conflictResolver.js` — new module
-- Updated `batchUpserter.js` with conflict resolution step
-
-**Effort:** 2 days
-
----
-
-### Phase 4 — Scheduler & Idempotency (Days 7–8)
-**Goal:** Automated daily trigger with overlap protection and full idempotency.
-
-**Tasks:**
-- Build `scripts/sync-runner.js` — the main sync orchestrator
-- Integrate `node-cron` for 2:00 AM MST scheduling (`0 9 * * *` UTC)
-- PID lock file — prevents a second run starting if previous run is still active
-- On completion: write `lastSyncAt`, clear PID lock
-- On failure: write error to log, send alert, preserve `lastSyncAt` (re-run next day picks up same window)
-
-**Deliverables:**
-- `scripts/sync-runner.js` — orchestrator
-- Cron setup instructions for remote server
-- Idempotency verified: re-running same day's sync produces identical HubSpot state
-
-**Effort:** 2 days
-
----
-
-### Phase 5 — Summary Email & Alerting (Days 9–10)
-**Goal:** Daily visibility into sync health without manual log checking.
-
-**Tasks:**
-- Build `src/utils/mailer.js` — sends structured HTML email via nodemailer / SendGrid
-- End-of-run summary: contacts synced, created, updated, failed, skipped, run duration
-- On-failure alert: immediate email if run crashes or failure rate exceeds threshold (e.g. >5%)
-- Email recipients configurable via `.env`
-
-**Deliverables:**
-- `src/utils/mailer.js`
-- Daily summary email template
-- Failure alert email template
-- Sample report emailed to Shawn + Alex for sign-off
-
-**Effort:** 2 days
-
----
-
-### Phase 6 — Testing, Validation & Go-Live (Days 11–12)
-**Goal:** Confirm the sync is correct and production-ready before handing off.
-
-**Tasks:**
-- Run sync in dry-run mode for 3 consecutive days — log what would change without touching HubSpot
-- Compare GHL contact counts vs HubSpot contact counts daily
-- Validate a sample of 50 contacts: GHL values match HubSpot values for all synced fields
-- Confirm conflict resolution working: manually update a HubSpot field, verify sync does not overwrite it
-- First live run — monitor in real time
-- Handoff documentation
-
-**Deliverables:**
-- 3-day dry-run log showing sync is healthy
-- Validation report (50 contact spot-check)
-- Handoff doc for Andy and the internal team
-- First successful live run confirmed
-
-**Effort:** 2 days
-
----
-
-## Part 4 — Reusable vs. Net-New Components
-
-### Reusable As-Is
-| Component | File | Notes |
-|---|---|---|
-| GHL API client | `src/extract/ghlClient.js` | Add one method: `getContactsSince(date)` |
-| HubSpot API client | `src/load/hubspotClient.js` | No changes needed |
-| Field mapper | `src/transform/fieldMapper.js` | No changes needed |
-| Data cleaner | `src/transform/cleaner.js` | No changes needed |
-| Geo resolver | `src/transform/geoResolver.js` | No changes needed |
-| Deduplicator | `src/transform/deduplicator.js` | No changes needed |
-| Batch upserter | `src/load/batchUpserter.js` | Add conflict resolution hook |
-| Checkpoint system | `src/load/checkpoint.js` | Extend for sync state |
-| Logger | `src/utils/logger.js` | No changes needed |
-| Rate limit / retry | Both clients | No changes needed |
-
-### Net-New Components
-| Component | File | Purpose |
-|---|---|---|
-| Sync extractor | `scripts/sync-extract.js` | Delta pull from GHL since lastSyncAt |
-| Sync runner | `scripts/sync-runner.js` | Orchestrator + cron + PID lock |
-| Conflict resolver | `src/transform/conflictResolver.js` | HubSpot vs GHL field ownership |
-| Mailer | `src/utils/mailer.js` | Daily summary + failure alerts |
-| Sync state | `data/sync-state.json` | Stores lastSyncAt + run history |
-
----
-
-## Part 5 — Key Technical Risks & Open Questions
-
-### Risk 1 — Detecting Manually-Updated HubSpot Fields
-**Problem:** HubSpot's property history API (`GET /crm/v3/objects/contacts/{id}/property-history`)
-returns the source of each write but is a per-contact call — expensive at scale.
-
-**Options:**
-- Fetch property history only for fields where GHL value differs from current HubSpot value
-  (reduces calls dramatically)
-- Maintain a list of "HubSpot-owned" fields that the sync never touches regardless of source
-  (simpler, less API-intensive — recommended for initial version)
-
-**Resolution needed:** Confirm with Andy which fields are "HubSpot-owned" (managed by the sales
-team in the UI) vs "GHL-owned" (always sourced from Engager).
-
----
-
-### Risk 2 — GHL Delta Query Reliability
-**Problem:** GHL's `dateUpdated` filter on the Search API caps at 10K results per query window.
-For days with high contact activity (post-event), a single day's window could exceed 10K.
-
-**Mitigation:** Already solved during Tier 2 — monthly chunking strategy can be applied to
-daily windows by splitting into hour-level chunks if needed. Low risk.
-
----
-
-### Risk 3 — Where the Cron Runs
-**Problem:** The sync must run on a server that stays on 24/7 and has access to both GHL and
-HubSpot APIs. The current remote machine used for the migration is a candidate.
-
-**Resolution needed:** Confirm with Alex/Andy whether the migration server stays available
-long-term, or whether a cloud deployment (AWS Lambda, a small VPS, or Railway) is preferred.
-This affects setup time and ongoing hosting cost.
-
----
-
-### Risk 4 — Opportunity / Activity Sync Scope
-**Problem:** GHL opportunity stages and activity notes were not in the original migration scope.
-Including them in the daily sync adds complexity and effort.
-
-**Recommendation:** Deliver contact sync first (Phases 1–6 above), then scope opportunity and
-note sync as a follow-on engagement once the contact pipeline is stable.
-
----
-
-### Risk 5 — GHL Active Sync (hs-to-hl)
-**Problem:** As of May 2026, the client's team was actively routing new HubSpot contacts back
-into GHL (`hs-to-hl` tag). If this is still running, there is a risk of circular sync loops
-(GHL → HubSpot → GHL → HubSpot).
-
-**Resolution needed:** Confirm with Andy whether the `hs-to-hl` reverse sync is still active.
-If so, the daily sync must filter out contacts tagged `hs-to-hl` or `hs-transfer` (already
-done in the Tier 3 extractor — same logic applies here).
-
----
-
-## Summary Timeline
-
-| Phase | Description | Days | Cumulative |
+| Capability | Today | Needed for sync | Build size |
 |---|---|---|---|
-| 1 | Backfill + baseline | 2 | Day 2 |
-| 2 | Delta extraction engine | 2 | Day 4 |
-| 3 | Conflict resolution | 2 | Day 6 |
-| 4 | Scheduler + idempotency | 2 | Day 8 |
-| 5 | Summary email + alerting | 2 | Day 10 |
-| 6 | Testing + go-live | 2 | Day 12 |
+| Trigger | Manual | Cron, 2:00 AM MST | Small |
+| Data scope | Entire dataset | Only contacts changed since last run | **Medium — key risk** |
+| Dedup (email→phone) | ✅ Done | Same | None |
+| Never overwrite with blanks | ✅ Done | Same | None |
+| Conflict resolution | Passive only | Explicit HubSpot-wins-on-manual-edit | Medium |
+| Idempotency | Per-batch resume | Full re-run safety | Small |
+| Retry / backoff | ✅ Done | Same | None |
+| Structured logging | ✅ Done | Same + retention | None |
+| Daily summary email | ❌ | Email at end of run | Small |
+| Failure alert | ❌ | Email on crash / high failure rate | Small |
+| Tag sync | ✅ (via field mapper) | Same | None |
+| Geolocation sync | ✅ (geoResolver) | Same | None |
+| UTM field sync | ✅ (mapped to utm_source/medium) | Same | None |
+| Contact associations | ✅ (guest_of supported) | Re-validate on sync | Small |
+| Opportunity stage sync | ❌ | New — deals were never migrated | **Large** |
+| Activity note sync | ❌ | New — engagements never built | **Large** |
 
-**Total: 12 working days from project start.**
+### The four gaps that actually require thought
+
+**1. "What changed since last run?" (delta detection) — the critical unknown**
+The contacts list endpoint we use today (`/contacts/` with `startAfterId`) has no date filter. The
+date-filtered path is `POST /contacts/search`, which we already proved during Tier 2 using a
+**`dateAdded` range** filter (`{ field, operator: 'range', value: { gte, lte } }`). For a sync we
+need **`dateUpdated`** (modification time), not `dateAdded` (creation time) — otherwise we'd miss
+contacts that were edited but not newly created. **Whether GHL's search supports filtering on a
+modification timestamp is the single most important thing to confirm before building.** Mitigations
+exist either way (see Risks), but this drives the Phase 2 estimate.
+
+**2. Conflict resolution — "did a human edit this in HubSpot?"**
+HubSpot records the *source* of every property write (`CRM_UI`, `API`, `IMPORT`, …) in its property
+history. Two ways to honor "HubSpot wins on manual edits":
+- **Field-ownership allowlist (recommended for v1):** define which fields are GHL-owned (tags,
+  geolocation, UTM, event/buyer custom fields) vs HubSpot-owned (anything the sales team edits by
+  hand). The sync only ever writes GHL-owned fields. Simple, fast, no extra API calls, and it
+  builds naturally on the existing upserter, which already refuses to overwrite identity fields.
+- **Property-history check (v2, if needed):** for contested fields, call HubSpot's property history
+  and skip any field whose last write came from `CRM_UI`. More precise, but a per-contact call —
+  only worth it for a small set of fields.
+
+**3. Scheduling + idempotency**
+A `node-cron` job on a server that's always on, plus a PID/lock file so two runs never overlap, plus
+a `sync-state.json` that records `lastSyncAt` only after a clean finish (so a failed run re-pulls the
+same window tomorrow rather than skipping it).
+
+**4. Daily summary email + alert**
+A small mailer (nodemailer or a transactional service) that sends the end-of-run summary, and an
+immediate alert if the run crashes or the failure rate crosses a threshold.
 
 ---
 
-*Prepared by Shawn Anderson | shawnanderson81work@outlook.com*
+## Part 3 — Phased Plan
+
+> Estimates are working days. Items marked **(client)** are decisions/access I need from your side,
+> not build time.
+
+### Phase 0 — Decisions & Access — 0.5 day (mostly client)
+- Confirm GHL search supports a **modification-date** filter (or agree on the fallback).
+- Confirm the **field-ownership list**: which HubSpot fields are sales-team-owned and off-limits.
+- Confirm **where the cron runs** (the existing US remote machine is the natural home).
+- Confirm whether the Engager→HubSpot reverse routing (`hs-to-hl` tag) is still active.
+- **Deliverable:** a one-page decisions sheet that unblocks the build.
+
+### Phase 1 — Backfill (close the May 20 gap) — 1.5 days
+- Run the existing pipeline over everything created/updated in GHL since May 20.
+- Reconcile HubSpot counts before/after; write the first `sync-state.json` baseline.
+- **Deliverable:** HubSpot current as of go-live; baseline state file; backfill report.
+
+### Phase 2 — Delta Extraction Engine — 2.5 days *(carries the main risk)*
+- Add `getContactsChangedSince(date)` to the GHL client (search API + monthly/daily chunking, reusing
+  the Tier 2 chunking approach to stay under GHL's 10K-per-query cap).
+- New `scripts/sync-extract.js` writes the day's delta to an NDJSON checkpoint.
+- `lastSyncAt` advances only on success; failed windows are retried next run.
+- **Deliverable:** incremental extractor that pulls only what changed.
+
+### Phase 3 — Conflict Resolution — 2 days
+- New `src/transform/conflictResolver.js` implementing the field-ownership allowlist (v1).
+- Hook it into `batchUpserter` just before update payloads are built.
+- Optional property-history check wired behind a config flag for a small set of contested fields.
+- **Deliverable:** HubSpot manual edits provably protected (verified by test in Phase 6).
+
+### Phase 4 — Scheduler & Idempotency — 2 days
+- New `scripts/sync-runner.js` orchestrator: extract → transform → upsert → report.
+- `node-cron` at `0 9 * * *` UTC (= 2:00 AM MST); PID lock prevents overlap.
+- `sync-state.json` for `lastSyncAt` + run history; full re-run safety.
+- **Deliverable:** hands-off nightly run with overlap protection.
+
+### Phase 5 — Logging, Summary Email & Alerts — 1.5 days
+- New `src/utils/mailer.js`: end-of-run HTML summary (synced / created / updated / failed / skipped /
+  duration) + immediate alert on crash or failure-rate breach. Recipients via `.env`.
+- Confirm log file location/retention is accessible to you and the project owner.
+- **Deliverable:** a sample summary email sent to you and Alex for sign-off.
+
+### Phase 6 — Dry-Run, Validation & Go-Live — 2 days
+- Run 3 nights in **dry-run** (log what *would* change, touch nothing).
+- Daily GHL-vs-HubSpot count reconciliation; 50-contact field spot-check.
+- Conflict test: hand-edit a HubSpot field, confirm the sync leaves it alone.
+- First live run, monitored; handoff doc for Andy and the team.
+- **Deliverable:** verified, production-ready nightly sync.
+
+### Phase 7 *(optional)* — Opportunity Stages + Activity Notes — 3–4 days
+- **New build** (deals/engagements were never in migration scope): map GHL opportunity stages →
+  HubSpot deal stages; map GHL activity notes → HubSpot engagement notes; re-validate associations.
+- Recommend delivering Phases 1–6 first and treating this as a fast follow-on once the contact sync
+  is stable.
+- **Deliverable:** deal-stage and note sync layered onto the nightly run.
+
+---
+
+## Part 4 — Reusable vs. Net-New
+
+### Reuse as-is (no changes)
+`fieldMapper.js` · `cleaner.js` · `geoResolver.js` · `deduplicator.js` · `hubspotClient.js`
+(incl. associations) · `logger.js` · retry/backoff in both clients · `config.js`
+
+### Reuse with a small addition
+`ghlClient.js` — add `getContactsChangedSince(date)` · `batchUpserter.js` — add a conflict-resolution
+hook · `checkpoint.js` — extend for sync state
+
+### Net-new
+`scripts/sync-extract.js` · `scripts/sync-runner.js` (cron + lock) ·
+`src/transform/conflictResolver.js` · `src/utils/mailer.js` · `data/sync-state.json` ·
+*(Phase 7)* deal-stage + note sync modules
+
+---
+
+## Part 5 — Risks & Open Questions
+
+| # | Risk / Question | Impact | Mitigation |
+|---|---|---|---|
+| 1 | **Does GHL search filter on modification date** (not just creation date)? | High — defines delta detection | If no: pull by `dateAdded` for new contacts, plus a rolling N-day re-scan window for edits; or use GHL webhooks if available. |
+| 2 | **Which HubSpot fields are sales-team-owned?** | High — drives conflict rules | Phase 0 decisions sheet with Andy. Default: only GHL-owned fields are ever written. |
+| 3 | **Where does the cron run?** | Medium — hosting/setup | Existing US remote machine if it stays on 24/7; otherwise a small VPS/cloud function (adds setup + hosting cost). |
+| 4 | **Is the `hs-to-hl` reverse sync still active?** | Medium — loop risk | Filter out `hs-to-hl` / `hs-transfer` tagged contacts (same guard already used in the Tier 3 extractor). |
+| 5 | **Opportunity/note sync is new construction** | Medium — cost driver | Keep in optional Phase 7; deliver contact sync first. |
+| 6 | High-activity days exceeding GHL's 10K/query cap | Low | Daily window already small; split into hourly chunks if needed (chunking already proven in Tier 2). |
+
+---
+
+## Timeline at a Glance
+
+| Phase | Scope | Days | Cumulative |
+|---|---|---|---|
+| 0 | Decisions & access | 0.5 | 0.5 |
+| 1 | Backfill | 1.5 | 2 |
+| 2 | Delta extraction | 2.5 | 4.5 |
+| 3 | Conflict resolution | 2 | 6.5 |
+| 4 | Scheduler & idempotency | 2 | 8.5 |
+| 5 | Logging, email, alerts | 1.5 | 10 |
+| 6 | Dry-run, validation, go-live | 2 | 12 |
+| 7 | *(optional)* opportunity + notes | 3–4 | 15–16 |
+
+**Contact sync core: ~10–12 days. With opportunity stages + activity notes: ~13–16 days.**
+
+---
+
+*Prepared by Shawn Anderson · shawnanderson81work@outlook.com*

@@ -16,8 +16,9 @@ async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 2000 } = {}) {
       return await fn();
     } catch (err) {
       const status = err.response?.status;
-      // Retry on 429 (rate limit) or SSL/network errors (no HTTP status — transient on remote)
-      const isRetryable = status === 429 || !status;
+      // Retry on 429 (rate limit), transient 5xx (GHL gateway hiccups), or
+      // SSL/network errors (no HTTP status — transient on the remote machine).
+      const isRetryable = status === 429 || (status >= 500 && status < 600) || !status;
       if (isRetryable && attempt < maxAttempts) {
         const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '0', 10);
         const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelayMs * attempt;
@@ -127,6 +128,146 @@ export class GHLClient {
 
     logger.info(`GHL contact extraction complete — ${all.length} total contacts`);
     return all;
+  }
+
+  /**
+   * Coerce a Date / ISO string / epoch into an ISO-8601 string, with a clear error.
+   * @param {Date|string|number} value
+   * @param {string} label - Used in the error message for context
+   * @returns {string} ISO-8601 timestamp
+   */
+  _toIso(value, label) {
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) {
+      throw new Error(`getContactsChangedSince: invalid '${label}' value: ${JSON.stringify(value)}`);
+    }
+    return d.toISOString();
+  }
+
+  /**
+   * Fetch one page of POST /contacts/search filtered by a `dateUpdated` range.
+   * Retries 429 / 5xx / network via withRetry.
+   *
+   * @param {{ gte: string, lte: string }} window - ISO range bounds (both inclusive)
+   * @param {number} page - 1-based page number
+   * @param {number} pageLimit - Page size (max 100)
+   * @returns {Promise<{ contacts: Array, total: number }>}
+   */
+  async _searchByDateUpdated(window, page, pageLimit) {
+    const client = this._getClient();
+    try {
+      const res = await withRetry(() =>
+        client.post('/contacts/search', {
+          locationId: this.locationId,
+          filters: [
+            { field: 'dateUpdated', operator: 'range', value: { gte: window.gte, lte: window.lte } },
+          ],
+          pageLimit,
+          page,
+        })
+      );
+      return { contacts: res.data?.contacts ?? [], total: res.data?.total ?? 0 };
+    } catch (err) {
+      throw new Error(
+        `contacts/search dateUpdated [${window.gte}..${window.lte}] page ${page} failed: ${err.message}`
+      );
+    }
+  }
+
+  /**
+   * Fetch every contact whose GHL `dateUpdated` (modification time) falls within
+   * [since, until]. This is the delta-detection primitive for the nightly sync —
+   * it surfaces edits to existing contacts, not just newly created ones.
+   *
+   * `dateUpdated` is the only modification-date field GHL's search accepts
+   * (confirmed by probe against PROD). A single search query is capped at ~10,000
+   * results (100 pages × 100). To stay under that cap for any window size — a
+   * 1-day nightly delta or a multi-week backfill — the window is split
+   * adaptively: when GHL reports more than the cap for a window, the window is
+   * bisected in time and each half is fetched recursively. Results are
+   * de-duplicated by contact id, so the inclusive boundary between halves is safe.
+   *
+   * Read-only: issues only POST /contacts/search; never writes.
+   *
+   * @param {Date|string|number} since - Inclusive lower bound (gte) on dateUpdated.
+   * @param {Object} [options]
+   * @param {Date|string|number} [options.until=new Date()] - Inclusive upper bound (lte). Capture once at run start.
+   * @param {string[]} [options.excludeTags=[]] - Drop contacts carrying any of these tags (reverse-sync loop guard, e.g. 'hs-to-hl'). Filtered in memory — GHL has no server-side tag exclusion.
+   * @param {number} [options.pageLimit=100] - Page size (max 100).
+   * @param {number} [options.pageDelayMs=150] - Pause between page requests, to stay gentle on the API.
+   * @param {Function} [options.onBatch] - async (contacts, window) called per page AFTER exclude-tag filtering — lets the caller stream to disk instead of buffering.
+   * @param {Function} [options.onProgress] - ({ collected, scanned, window }) called per page.
+   * @returns {Promise<Array>} De-duplicated contacts modified within [since, until].
+   */
+  async getContactsChangedSince(since, {
+    until = new Date(),
+    excludeTags = [],
+    pageLimit = 100,
+    pageDelayMs = 150,
+    onBatch,
+    onProgress,
+  } = {}) {
+    const gte = this._toIso(since, 'since');
+    const lte = this._toIso(until, 'until');
+    if (Date.parse(gte) > Date.parse(lte)) {
+      throw new Error(`getContactsChangedSince: 'since' (${gte}) is after 'until' (${lte})`);
+    }
+
+    const MAX_PER_QUERY = 10000;   // GHL hard cap: 100 pages × 100
+    const MIN_WINDOW_MS = 60 * 1000; // floor for time-bisection (don't split below 1 min)
+
+    const excludeSet = new Set(excludeTags);
+    const contactMap = new Map(); // id → contact (dedup across bisected windows)
+    let scanned = 0;
+
+    const ingest = async (contacts, window) => {
+      const kept = excludeSet.size
+        ? contacts.filter(c => !(c.tags ?? []).some(t => excludeSet.has(t)))
+        : contacts;
+      for (const c of kept) {
+        if (c.id && !contactMap.has(c.id)) contactMap.set(c.id, c);
+      }
+      scanned += contacts.length;
+      if (onBatch && kept.length) await onBatch(kept, window);
+      if (onProgress) onProgress({ collected: contactMap.size, scanned, window });
+    };
+
+    const collectWindow = async (wGte, wLte) => {
+      const window = { gte: wGte, lte: wLte };
+      const first = await this._searchByDateUpdated(window, 1, pageLimit);
+
+      // Adaptive split: too many results for one query → bisect the time window.
+      if (first.total > MAX_PER_QUERY && (Date.parse(wLte) - Date.parse(wGte)) > MIN_WINDOW_MS) {
+        const mid = new Date(Math.floor((Date.parse(wGte) + Date.parse(wLte)) / 2)).toISOString();
+        logger.info(`getContactsChangedSince: window [${wGte}..${wLte}] has ${first.total} (> ${MAX_PER_QUERY}) — bisecting at ${mid}`);
+        await collectWindow(wGte, mid);
+        await collectWindow(mid, wLte); // both ends inclusive; dedup by id absorbs the boundary
+        return;
+      }
+
+      await ingest(first.contacts, window);
+
+      let page = 1;
+      let lastCount = first.contacts.length;
+      while (lastCount === pageLimit) {
+        if (page >= 100) {
+          logger.warn(`getContactsChangedSince: window [${wGte}..${wLte}] hit the 100-page cap (total=${first.total}); narrowing failed — some edits may be unfetched`);
+          break;
+        }
+        page++;
+        if (pageDelayMs) await sleep(pageDelayMs);
+        const next = await this._searchByDateUpdated(window, page, pageLimit);
+        await ingest(next.contacts, window);
+        lastCount = next.contacts.length;
+      }
+    };
+
+    logger.info(`getContactsChangedSince: scanning dateUpdated in [${gte}..${lte}], excludeTags=[${excludeTags.join(',')}]`);
+    await collectWindow(gte, lte);
+
+    const result = [...contactMap.values()];
+    logger.info(`getContactsChangedSince: ${result.length} unique changed contacts (scanned ${scanned} rows)`);
+    return result;
   }
 
   /**

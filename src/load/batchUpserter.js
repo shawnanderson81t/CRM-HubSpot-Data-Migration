@@ -25,12 +25,17 @@ export class BatchUpserter {
    * @param {import('../load/checkpoint.js').Checkpoint} checkpoint
    * @param {Object} config - Output of loadConfig()
    * @param {Object} [ownerMap] - GHL userId → HubSpot ownerId lookup (optional)
+   * @param {import('../transform/conflictResolver.js').ConflictResolver} [conflictResolver]
+   *   Optional. When supplied (daily sync), update payloads are restricted to
+   *   GHL-owned fields so manual HubSpot edits are preserved. Omitted for the
+   *   one-time migration, which writes every mapped field.
    */
-  constructor(hubspotClient, checkpoint, config, ownerMap = {}) {
+  constructor(hubspotClient, checkpoint, config, ownerMap = {}, conflictResolver = null) {
     this.hs = hubspotClient;
     this.checkpoint = checkpoint;
     this.config = config;
     this.ownerMap = ownerMap;
+    this.conflictResolver = conflictResolver;
     this.batchDelayMs = config.migration.batchDelayMs;
   }
 
@@ -85,6 +90,7 @@ export class BatchUpserter {
     let updated  = 0;
     let inserted = 0;
     let failed   = 0;
+    let withheld = 0; // count of non-GHL-owned field writes the conflict resolver suppressed
     const errors = [];
 
     // Step 5 — Batch update (contacts that exist in HubSpot)
@@ -97,18 +103,39 @@ export class BatchUpserter {
     // different lookup keys (email vs phone vs engager_id). HubSpot rejects the batch
     // with "Duplicate IDs found" if we send the same HS ID twice.
     if (updates.length > 0) {
-      const safeUpdates = updates.map(u => {
+      let safeUpdates = updates.map(u => {
         const { engager_contact_id, email, phone, ...safeProps } = u.properties;
+        // Conflict resolution (sync only): keep only GHL-owned fields on updates so
+        // manual HubSpot edits to sales-owned fields survive. No-op for the migration.
+        if (this.conflictResolver) {
+          const { properties: owned, withheld: dropped } = this.conflictResolver.filterUpdate(safeProps);
+          withheld += dropped.length;
+          return { hubspotId: u.hubspotId, properties: owned };
+        }
         return { hubspotId: u.hubspotId, properties: safeProps };
       });
+
+      // After filtering, some updates may have nothing GHL-owned left to write —
+      // drop them rather than sending an empty PATCH.
+      if (this.conflictResolver) {
+        const before = safeUpdates.length;
+        safeUpdates = safeUpdates.filter(u => Object.keys(u.properties).length > 0);
+        const noChange = before - safeUpdates.length;
+        if (withheld > 0 || noChange > 0) {
+          logger.info(`Batch ${batchNumber}: conflict resolver withheld ${withheld} field writes; ${noChange} updates had no GHL-owned changes`);
+        }
+      }
+
       const uniqueUpdates = [...new Map(safeUpdates.map(u => [u.hubspotId, u])).values()];
       if (safeUpdates.length !== uniqueUpdates.length) {
         logger.warn(`Batch ${batchNumber}: deduped ${safeUpdates.length - uniqueUpdates.length} duplicate hubspotIds from update batch`);
       }
-      const res = await this.hs.batchUpdateContacts(uniqueUpdates);
-      updated += res.succeeded;
-      failed  += res.failed;
-      errors.push(...res.errors);
+      if (uniqueUpdates.length > 0) {
+        const res = await this.hs.batchUpdateContacts(uniqueUpdates);
+        updated += res.succeeded;
+        failed  += res.failed;
+        errors.push(...res.errors);
+      }
     }
 
     // Step 6 — Batch create (new contacts)
@@ -119,7 +146,7 @@ export class BatchUpserter {
       errors.push(...res.errors);
     }
 
-    return { updated, inserted, failed, skipped: unresolvable.length, errors };
+    return { updated, inserted, failed, skipped: unresolvable.length, withheld, errors };
   }
 
   /**

@@ -48,8 +48,34 @@ const STANDARD_PROPS = [
   'buyer_tier', 'cancellation_status', 'fulfillment_status', 'eventtag',
 ];
 
+/**
+ * HubSpot properties a human edits directly in HubSpot — the sync must never
+ * overwrite these on updates, even though the mapper can produce them.
+ *
+ * Confirmed off-limits:
+ *   - assigned_coach — assigned by hand by the Coaching Manager (Carter Brown).
+ *
+ * Protected pending team confirmation — fulfillment and sales staff move these
+ * across both platforms by necessity, so withholding is the safe default. Remove
+ * a field from this set to hand it back to GoHighLevel once the field owner
+ * confirms GoHighLevel is the source of truth:
+ *   - sales rep / team: workshop_team, preview_sales_rep, telesales_repteam
+ *   - fulfillment + attendance: fulfillment_status and the *_attendance_status fields
+ */
+const HUBSPOT_OWNED_FIELDS = new Set([
+  'assigned_coach',
+  // pending confirmation (safe-default protected):
+  'workshop_team', 'preview_sales_rep', 'telesales_repteam',
+  'fulfillment_status',
+  'preview_attendance_status', 'workshop_attendance_status', 'foundations_attendance_status',
+  'auction_attendance_status', 'commercial_attendance_status', 'expo_attendance_status',
+  'summit_attendance_status', 'symposium_attendance_status',
+]);
+
 /** Default set of HubSpot properties the sync is allowed to write on EXISTING contacts. */
-export const DEFAULT_GHL_OWNED_FIELDS = Object.freeze([...STANDARD_PROPS, ...CUSTOM_FIELD_PROPS]);
+export const DEFAULT_GHL_OWNED_FIELDS = Object.freeze(
+  [...STANDARD_PROPS, ...CUSTOM_FIELD_PROPS].filter(name => !HUBSPOT_OWNED_FIELDS.has(name))
+);
 
 export class ConflictResolver {
   /**

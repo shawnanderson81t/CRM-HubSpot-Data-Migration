@@ -33,5 +33,18 @@ export function loadConfig() {
       checkpointDir: process.env.CHECKPOINT_DIR || './data/checkpoints',
       logDir: process.env.LOG_DIR || './logs',
     },
+    sync: {
+      statePath: process.env.SYNC_STATE_PATH || './data/sync-state.json',
+      lockPath:  process.env.SYNC_LOCK_PATH  || './data/sync.lock',
+      // First run only (no watermark yet): how far back to look.
+      defaultLookbackHours: parseInt(process.env.SYNC_DEFAULT_LOOKBACK_HOURS || '24', 10),
+      // Reverse-sync loop guard — contacts written back into GHL from HubSpot.
+      excludeTags: (process.env.SYNC_EXCLUDE_TAGS || 'hs-to-hl,hs-transfer')
+        .split(',').map(s => s.trim()).filter(Boolean),
+      // 09:00 UTC = 2:00 AM MST (used only by the optional --schedule loop).
+      scheduleUtcHour: parseInt(process.env.SYNC_SCHEDULE_UTC_HOUR || '9', 10),
+      // Above this per-run failure rate the run is treated as failed (watermark held + alert).
+      maxFailureRate: parseFloat(process.env.SYNC_MAX_FAILURE_RATE || '0.1'),
+    },
   };
 }

@@ -36,6 +36,7 @@ import { Checkpoint } from '../src/load/checkpoint.js';
 import { BatchUpserter } from '../src/load/batchUpserter.js';
 import { ConflictResolver } from '../src/transform/conflictResolver.js';
 import { SyncState } from '../src/load/syncState.js';
+import { Mailer } from '../src/utils/mailer.js';
 import { acquireLock, releaseLock } from '../src/utils/pidLock.js';
 
 /**
@@ -92,6 +93,9 @@ export async function runOnce(config, { dryRun = false, sinceOverride = null, de
   const startedAt = new Date();
   const until = startedAt.toISOString();
   const syncState = new SyncState(config.sync.statePath);
+  const mailer = deps.mailer || new Mailer(config.mail);
+  // Mail is a side-channel — a mail failure must never fail the sync run itself.
+  const notify = async fn => { try { await fn(); } catch (e) { logger.error('Mailer error (non-fatal)', { error: e.message }); } };
 
   try {
     const { since, source } = resolveWindow(config, syncState, until, sinceOverride);
@@ -112,8 +116,12 @@ export async function runOnce(config, { dryRun = false, sinceOverride = null, de
 
     // Dry run: report only, never touch HubSpot, never move the watermark -----
     if (dryRun) {
+      const summary = { startedAt: until, finishedAt: new Date().toISOString(), ok: true,
+        dryRun: true, window: { since, until }, changed: delta.length,
+        updated: 0, inserted: 0, failed: 0, skipped: 0 };
+      await notify(() => mailer.sendRunSummary(summary));
       console.log(`  DRY RUN — ${delta.length} contacts would be processed. Nothing written; watermark unchanged.`);
-      return { ok: true, dryRun: true, window: { since, until }, changed: delta.length };
+      return summary;
     }
 
     // Nothing changed: safe to advance the watermark -------------------------
@@ -121,6 +129,7 @@ export async function runOnce(config, { dryRun = false, sinceOverride = null, de
       const summary = { startedAt: until, finishedAt: new Date().toISOString(), ok: true,
         window: { since, until }, changed: 0, updated: 0, inserted: 0, failed: 0, skipped: 0 };
       syncState.recordRun(summary, { advanceTo: until });
+      await notify(() => mailer.sendRunSummary(summary));
       console.log('  Nothing changed in the window. Watermark advanced.');
       return summary;
     }
@@ -155,6 +164,8 @@ export async function runOnce(config, { dryRun = false, sinceOverride = null, de
     if (!ok) {
       logger.error(`Sync failure rate ${(failureRate * 100).toFixed(1)}% exceeded ${config.sync.maxFailureRate * 100}% — watermark held`);
     }
+    await notify(() => mailer.sendRunSummary(summary));
+    if (!ok) await notify(() => mailer.sendFailureAlert({ ...summary, error: 'failure rate exceeded threshold' }));
     return summary;
   } catch (err) {
     logger.error('Sync run crashed — watermark NOT advanced', { error: err.message, stack: err.stack });
@@ -162,6 +173,7 @@ export async function runOnce(config, { dryRun = false, sinceOverride = null, de
       { startedAt: until, finishedAt: new Date().toISOString(), ok: false, error: err.message },
       { advanceTo: null }
     );
+    await notify(() => mailer.sendFailureAlert({ startedAt: until, error: err.message, window: { until } }));
     console.error(`\nFatal: ${err.message}`);
     return { ok: false, error: err.message };
   } finally {

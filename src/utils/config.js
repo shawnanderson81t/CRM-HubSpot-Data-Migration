@@ -46,5 +46,21 @@ export function loadConfig() {
       // Above this per-run failure rate the run is treated as failed (watermark held + alert).
       maxFailureRate: parseFloat(process.env.SYNC_MAX_FAILURE_RATE || '0.1'),
     },
+    mail: {
+      // 'smtp' when a host is set, else 'file' (renders to logs/emails/ — works with no creds).
+      transport: process.env.MAIL_TRANSPORT || (process.env.MAIL_SMTP_HOST ? 'smtp' : 'file'),
+      from: process.env.MAIL_FROM || 'ghl-hubspot-sync@localhost',
+      outboxDir: process.env.MAIL_OUTBOX_DIR || './logs/emails',
+      summaryRecipients: (process.env.MAIL_SUMMARY_TO || '').split(',').map(s => s.trim()).filter(Boolean),
+      alertRecipients: (process.env.MAIL_ALERT_TO || process.env.MAIL_SUMMARY_TO || '')
+        .split(',').map(s => s.trim()).filter(Boolean),
+      smtp: {
+        host: process.env.MAIL_SMTP_HOST || '',
+        port: parseInt(process.env.MAIL_SMTP_PORT || '587', 10),
+        secure: (process.env.MAIL_SMTP_SECURE || 'false') === 'true',
+        user: process.env.MAIL_SMTP_USER || '',
+        pass: process.env.MAIL_SMTP_PASS || '',
+      },
+    },
   };
 }
